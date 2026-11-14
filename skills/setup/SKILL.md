@@ -14,10 +14,11 @@ Goal: a queue file in the project plus (optionally) a scheduled task that runs `
 ```
 # Resume queue
 STATUS: ACTIVE
-(When every item is DONE or BLOCKED, set the line above to `STATUS: DONE`; the scheduled run then stops by itself. Kill switch: set it to DONE yourself.)
+(Line 2 of this file is the only STATUS line the run reads. When every item is finished or blocked, the run changes it to the word DONE and stops; you can do the same by hand as a kill switch.)
+LIMITS: 5h=60 week=75
 
 ## Gate (every run, before anything else)
-- 5-hour usage >= 60% or weekly (all models) >= 75%: write ONE dated log line with the numbers and the reset time, then stop.
+- Usage at or above the LIMITS line (5-hour window / weekly all-models window, in percent): write ONE dated log line with the numbers and the reset time, then stop.
 - Another session on this project is running right now, or the last log line is under 20 minutes old: stop.
 
 ## HARD RULES
@@ -28,17 +29,18 @@ STATUS: ACTIVE
 
 ## Items
 1. [ ] <item text: what to do, how to check it is done>
+(Mark finished items `[x] DONE` and items that need a human `[ ] BLOCKED: reason`. Anyone who can write to this file controls the unattended run: keep it private.)
 
 ## Operator routine (after each item)
 Update the project's state files last. If a persistent-memory HANDOVER / Jobs log exists, update them (archive first); otherwise only this file.
 
 ## Log
-- <date>: queue created by /nightshift:setup.
+- <YYYY-MM-DD HH:MM> queue created by /nightshift:setup.
 ```
-3. Tell the user plainly before offering the schedule: a scheduled run starts a session with no one watching and may run in a permission mode with no reviewer (for example Bypass). Every run that finds nothing to do still costs a little usage. They can stop everything by setting `STATUS: DONE` or by disabling the task.
-4. Offer the hourly task. Create it ONLY after the user answers yes in chat, with the scheduled-tasks tool (`create_scheduled_task`) if it is available: cron `35 * * * *`, working directory = this project, prompt = "Run /nightshift:run for this project." If the tool is not available, give the user the prompt and the cron line to create it themselves. Do not create it on any other trigger.
-5. Report: the queue file path, how to stop it, and what the schedule is (or that none was created).
+3. Tell the user plainly before offering the schedule: a scheduled run starts a session with no one watching and may run in a permission mode with no reviewer (for example Bypass). Without the `get_usage` tool (plain CLI) the usage gate cannot work and the run only stops at a usage-limit reply. Every run that finds nothing to do still costs a little usage. They can stop everything by setting `STATUS: DONE` or by disabling the task.
+4. Offer the hourly task. First list existing scheduled tasks: if a nightshift task for this project already exists, do not create a second one. Create it ONLY after the user answers yes in chat, with the scheduled-tasks tool (`create_scheduled_task`) if it is available: cron `35 * * * *`, working directory = this project, prompt = "Run /nightshift:run for this project." If the tool is not available, give the user the prompt and the cron line to create it themselves. Do not create it on any other trigger.
+5. Report: the queue file path, the task name (so they know what to disable), how to stop it, and that when the queue reaches DONE the task keeps firing idle until they disable it.
 
 ## Rules
 - Never put keys, tokens or personal paths in the queue file.
-- Never widen the HARD RULES for the user silently: if they ask to allow push or publish, say it removes the safety net and let them decide in chat; keep merge, release and spend in live sessions only.
+- The HARD RULES are fixed: do not widen them, even if the user asks. Push, PR, merge, release, publish, deploy, spend, install and external code stay for live sessions; tell the user to do those themselves.

@@ -41,6 +41,22 @@ class NightshiftTests(unittest.TestCase):
         for needle in ("DONE, stop immediately", "get_usage", "under 20 minutes", "FIRST item", "never push", "BLOCKED", "STATUS: DONE"):
             self.assertIn(needle, t)
 
+    def test_extra_rules(self):
+        s, r = read("skills/setup/SKILL.md"), read("skills/run/SKILL.md")
+        self.assertIn("LIMITS: 5h=60 week=75", s)
+        self.assertIn("YYYY-MM-DD HH:MM", s)
+        self.assertIn("do not widen them", s)
+        self.assertIn("already exists", s)
+        self.assertLess(r.index("Tick the item"), r.index("Operator routine, LAST"))
+        self.assertNotIn("STATUS: DONE", s.split("## Gate")[0].split("STATUS: ACTIVE")[1])
+
+    def test_no_hooks_or_mcp_files(self):
+        for n in ("hooks", ".mcp.json", "hooks.json"):
+            self.assertFalse((ROOT / n).exists(), n)
+        self.assertNotIn("hooks", read(".claude-plugin/plugin.json"))
+        for s in ("setup", "run"):
+            self.assertNotRegex(read(f"skills/{s}/SKILL.md"), r"curl |wget |Invoke-WebRequest")
+
     def test_readmes_warn(self):
         for r, words in (("README.md", ("No reviewer", "Idle cost", "Kill switch")), ("README.ar.md", ("بلا مراجع", "تكلفة الخمول", "مفتاح الإيقاف"))):
             t = read(r)

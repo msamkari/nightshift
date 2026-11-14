@@ -19,7 +19,7 @@ Skills only: no scripts, no network code, nothing installed.
 If the project has `MDs/HANDOVER.md` and a Jobs log, each run updates them last (archiving first). Otherwise the queue file alone is the record.
 
 ## Privacy
-The plugin makes no network request and stores nothing outside your project.
+The plugin adds no network code and writes only inside your project; the scheduled task itself is stored by the Claude app, and every run is an ordinary Claude session.
 
 ## Licence
 MIT.
