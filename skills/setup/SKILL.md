@@ -9,7 +9,7 @@ Goal: a queue file in the project plus (optionally) a scheduled task that runs `
 
 ## Steps
 1. Ask the user (one message): which unfinished work should continue? Get 1-10 items, each small enough for ONE run (about 15 minutes). Ask what is forbidden beyond the defaults, and whether they want different usage limits (defaults: stop when the 5-hour window is at 60% or more, or the weekly window is at 75% or more).
-2. Show the draft queue file in chat and write it to `Jobs/resume_queue.md` (create `Jobs/` if needed; if the file exists, ask before replacing it and archive the old one first). Use exactly this layout:
+2. Show the draft queue file in chat and write it to `Jobs/resume_queue.md` (create `Jobs/` if needed; if the file exists, ask before replacing it and archive the old one first). Get the current time from the shell, never from memory: `date -u +"%Y-%m-%d %H:%M"`. Every log line starts with `- ` and that time followed by `UTC`. Use exactly this layout:
 
 ```
 # Resume queue
@@ -19,7 +19,7 @@ LIMITS: 5h=60 week=75
 
 ## Gate (every run, before anything else)
 - Usage at or above the LIMITS line (5-hour window / weekly all-models window, in percent): write ONE dated log line with the numbers and the reset time, then stop.
-- Another session on this project is running right now, or the last log line is under 20 minutes old: stop.
+- Another session on this project is running right now, or the last log line is under 20 minutes old (times in UTC): stop.
 
 ## HARD RULES
 - Local work only: edit files inside this project, run local commands and tests.
@@ -35,10 +35,10 @@ LIMITS: 5h=60 week=75
 Update the project's state files last. If a persistent-memory HANDOVER / Jobs log exists, update them (archive first); otherwise only this file.
 
 ## Log
-- <YYYY-MM-DD HH:MM> queue created by /nightshift:setup.
+- <YYYY-MM-DD HH:MM UTC> queue created by /nightshift:setup.
 ```
 3. Tell the user plainly before offering the schedule: a scheduled run starts a session with no one watching and may run in a permission mode with no reviewer (for example Bypass). Without the `get_usage` tool (plain CLI) the usage gate cannot work and the run only stops at a usage-limit reply. Every run that finds nothing to do still costs a little usage. They can stop everything by setting `STATUS: DONE` or by disabling the task.
-4. Offer the hourly task. First list existing scheduled tasks: if a nightshift task for this project already exists, do not create a second one. Create it ONLY after the user answers yes in chat, with the scheduled-tasks tool (`create_scheduled_task`) if it is available: cron `35 * * * *`, working directory = this project, prompt = "Run /nightshift:run for this project." If the tool is not available, give the user the prompt and the cron line to create it themselves. Do not create it on any other trigger.
+4. Offer the hourly task. First list existing scheduled tasks and read the prompt file of each candidate (the listing gives its `path`): if one already mentions nightshift and this project's absolute path, do not create a second one. Create it ONLY after the user answers yes in chat, with the scheduled-tasks tool (`create_scheduled_task`) if it is available: cron `35 * * * *`. That tool has no working-directory option and its task list has no project field, so the prompt must carry the absolute path of this project: "Run the nightshift run skill (/nightshift:run) once for the project at <absolute project path>; treat that folder as the project root and touch nothing outside it." If the tool is not available, give the user the prompt and the cron line to create it themselves. Do not create it on any other trigger.
 5. Report: the queue file path, the task name (so they know what to disable), how to stop it, and that when the queue reaches DONE the task keeps firing idle until they disable it.
 
 ## Rules

@@ -1,6 +1,6 @@
 {
   "name": "nightshift",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Usage-gated auto-resume for Claude Code: keep unfinished work moving with a queue file and an hourly scheduled run that stops itself when your plan limit is near. Skills only, local work only, no network code.",
   "license": "MIT",
   "homepage": "https://github.com/msamkari/nightshift",

@@ -44,9 +44,15 @@ class NightshiftTests(unittest.TestCase):
     def test_extra_rules(self):
         s, r = read("skills/setup/SKILL.md"), read("skills/run/SKILL.md")
         self.assertIn("LIMITS: 5h=60 week=75", s)
-        self.assertIn("YYYY-MM-DD HH:MM", s)
+        self.assertIn("YYYY-MM-DD HH:MM UTC", s)
+        self.assertIn('date -u +', s)
+        self.assertIn("absolute path", s)
+        self.assertIn("no working-directory option", s)
+        self.assertIn("date -u +", r)
+        self.assertIn("never from memory", r)
+        self.assertIn("- YYYY-MM-DD HH:MM UTC", r)
         self.assertIn("do not widen them", s)
-        self.assertIn("already exists", s)
+        self.assertIn("already mentions nightshift", s)
         self.assertLess(r.index("Tick the item"), r.index("Operator routine, LAST"))
         self.assertNotIn("STATUS: DONE", s.split("## Gate")[0].split("STATUS: ACTIVE")[1])
 
