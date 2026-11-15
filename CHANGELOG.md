@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.1.4 (2026-11-15)
+- Adversarial live round on 0.1.3 (four real scheduled runs): a `STATUS: DONE` below a blank line is still honored, a queue that rewrites its own HARD RULES to allow installs still gets the item BLOCKED, a failing check gives BLOCKED, and `LIMITS: 5h=0` stops on the usage gate; no lock folder was left behind in any case. The queue template written by setup now documents the lock (and how to clear a stale one), so it is no longer a hidden rule.
+
 ## 0.1.3 (2026-11-15)
 - Live retest of 0.1.2: two scheduled runs that started at the same second both executed item 1, so the read-after-write `RUNNING` claim is not enough. The claim is now an atomic `mkdir Jobs/.nightshift.lock` (fails if another run holds it; a lock older than 30 minutes is treated as a crashed run); the lock is removed at the end. The `RUNNING` line stays as a log line for the 20-minute check.
 

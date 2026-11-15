@@ -57,6 +57,7 @@ class NightshiftTests(unittest.TestCase):
         self.assertIn("rmdir Jobs/.nightshift.lock", r)
         self.assertIn("best effort only", r)
         self.assertIn("never leave it open to be retried", r)
+        self.assertIn(".nightshift.lock", s)
         self.assertIn("Run now", s)
         self.assertIn("30 minutes", s)
         self.assertIn("do not widen them", s)

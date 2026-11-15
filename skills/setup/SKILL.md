@@ -20,6 +20,7 @@ LIMITS: 5h=60 week=75
 ## Gate (every run, before anything else)
 - Usage at or above the LIMITS line (5-hour window / weekly all-models window, in percent): write ONE dated log line with the numbers and the reset time, then stop.
 - Another session on this project is running right now, or the last log line is under 20 minutes old (times in UTC): stop.
+- The run takes an atomic lock (`mkdir Jobs/.nightshift.lock`) before touching an item and removes it at the end; if the lock exists and is under 30 minutes old, another run is working: stop. A crashed run leaves the lock behind: after 30 minutes the next run clears it. You can delete the folder yourself to unblock sooner.
 
 ## HARD RULES
 - Local work only: edit files inside this project, run local commands and tests.
