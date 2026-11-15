@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.1.3 (2026-11-15)
+- Live retest of 0.1.2: two scheduled runs that started at the same second both executed item 1, so the read-after-write `RUNNING` claim is not enough. The claim is now an atomic `mkdir Jobs/.nightshift.lock` (fails if another run holds it; a lock older than 30 minutes is treated as a crashed run); the lock is removed at the end. The `RUNNING` line stays as a log line for the 20-minute check.
+
 ## 0.1.2 (2026-11-15)
 - Strict live tests in real scheduled sessions found two runs started 30 seconds apart on the same queue both executed item 1: the session-list check cannot be relied on. Now a run claims its item with a `RUNNING` log line before working and re-reads the file; later runs stop on the 20-minute log-age check. The session check stays as best effort.
 - A failing item check (non-zero exit) now marks the item BLOCKED instead of leaving it to be retried forever.

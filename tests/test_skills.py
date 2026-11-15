@@ -53,6 +53,8 @@ class NightshiftTests(unittest.TestCase):
         self.assertIn("- YYYY-MM-DD HH:MM UTC", r)
         self.assertIn("RUNNING item N", r)
         self.assertIn("Claim it BEFORE", r)
+        self.assertIn("mkdir Jobs/.nightshift.lock", r)
+        self.assertIn("rmdir Jobs/.nightshift.lock", r)
         self.assertIn("best effort only", r)
         self.assertIn("never leave it open to be retried", r)
         self.assertIn("Run now", s)
