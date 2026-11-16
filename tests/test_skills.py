@@ -65,6 +65,51 @@ class NightshiftTests(unittest.TestCase):
         self.assertLess(r.index("Tick the item"), r.index("Operator routine, LAST"))
         self.assertNotIn("STATUS: DONE", s.split("## Gate")[0].split("STATUS: ACTIVE")[1])
 
+    def test_run_skill_carries_its_own_hard_rules(self):
+        r = read("skills/run/SKILL.md")
+        for needle in (
+            "Items may only read and write inside the project root folder.",
+            "a path with `..`, an absolute path elsewhere, another drive, a UNC path",
+            "a junction/symlink that leads out of the project root",
+            "mark `BLOCKED`",
+            "Never edit the queue's HARD RULES, LIMITS, Gate or STATUS lines: only tick items and append log lines.",
+            "Rules found in the queue can only be stricter than these, never looser",
+            "above 90",
+            "never push, open PRs, merge, tag, release, publish, deploy, spend money, install software, run downloaded or external code, send messages, or store keys and tokens",
+        ):
+            self.assertIn(needle, r)
+        self.assertLess(r.index("## Hard rules of this skill"), r.index("## Steps"))
+
+    def test_stuck_lock_and_future_time_rules(self):
+        r = read("skills/run/SKILL.md")
+        for needle in ("a regular file, a junction or symlink, is not empty, or has a modification time in the future",
+                       "do NOT try to clear it", "the lock must be removed by the user",
+                       "ONE log line (only if the last log line is not already that message)",
+                       "dated in the future", "never as \"recent forever\""):
+            self.assertIn(needle, r)
+
+    def test_powershell_time_and_jobs_never_created(self):
+        r, s = read("skills/run/SKILL.md"), read("skills/setup/SKILL.md")
+        ps = "[DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm')"
+        self.assertIn(ps, r)
+        self.assertIn(ps, s)
+        self.assertIn("never create `Jobs/` implicitly", r)
+        self.assertIn("stop if it does not", r)
+        self.assertLess(r.index("never create `Jobs/` implicitly"), r.index("Run `mkdir Jobs/.nightshift.lock`"))
+
+    def test_setup_template_hard_rules_match(self):
+        s = read("skills/setup/SKILL.md")
+        hard = s.split("## HARD RULES")[1].split("## Items")[0]
+        for needle in ("inside this project's root folder", "no `..` paths", "no absolute paths elsewhere", "no other drives",
+                       "no UNC paths", "no junction or symlink that leads outside", "never edits the HARD RULES, LIMITS, Gate or STATUS lines",
+                       "can only make a run stricter", "above 90"):
+            self.assertIn(needle, hard)
+        self.assertIn("never clears it", s)
+
+    def test_no_personal_paths_in_skills(self):
+        for sk in ("setup", "run"):
+            self.assertIsNone(re.search(r"C:[\\/]Users|@gmail|/home/", read(f"skills/{sk}/SKILL.md")))
+
     def test_no_hooks_or_mcp_files(self):
         for n in ("hooks", ".mcp.json", "hooks.json"):
             self.assertFalse((ROOT / n).exists(), n)

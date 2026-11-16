@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.5 (2026-11-15)
+Skills text and tests only (no code), from the round-2 adversarial report:
+- The run skill now carries its own hard rules instead of relying on the queue file: items may only read and write inside the project root folder (refuse `..`, absolute paths elsewhere, other drives, UNC, junction/symlink escapes, mark BLOCKED); the queue's HARD RULES/LIMITS/Gate/STATUS lines are never edited (only ticks and log lines; the single `STATUS: DONE` at the end stays); rules found in the queue can only be stricter; a `LIMITS` threshold above 90 counts as 90 (so `5h=100` no longer turns the gate off). The setup template's HARD RULES say the same.
+- Stuck lock: if `Jobs/.nightshift.lock` is a file, a junction/symlink, not empty or dated in the future, the run does not try to clear it: it stops, tells the user to remove it, and logs ONE line (not again if the last log line is already that message). A future-dated last log line is reported once and treated as unparseable for the 20-minute check instead of "recent forever".
+- Time and shell: native PowerShell uses `[DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm')` (there `date -u` printed local time); the lock is created only when `Jobs/` already exists (PowerShell `mkdir` would create it silently); runs work from the project root.
+- Tests: 8 -> 13 (they assert the sentences exist).
+- Not verified: everything about model behaviour is predicted from the text; no scheduled run, Bypass mode or PowerShell-only session was run for this release. Still open from the report: the 20-minute gate can be switched off by an unparseable last line (N3), a run longer than 30 minutes loses its lock (N8), line-2 lookalikes (N9) and huge queue files (N10).
+
 ## 0.1.4 (2026-11-15)
 - Adversarial live round on 0.1.3 (four real scheduled runs): a `STATUS: DONE` below a blank line is still honored, a queue that rewrites its own HARD RULES to allow installs still gets the item BLOCKED, a failing check gives BLOCKED, and `LIMITS: 5h=0` stops on the usage gate; no lock folder was left behind in any case. The queue template written by setup now documents the lock (and how to clear a stale one), so it is no longer a hidden rule.
 
