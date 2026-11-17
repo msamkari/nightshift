@@ -8,7 +8,7 @@ description: Set up usage-gated auto-resume for unfinished work in this project 
 Goal: a queue file in the project plus (optionally) a scheduled task that runs `/nightshift:run` repeatedly. Nothing is created before the user answers in chat.
 
 ## Steps
-1. Ask the user (one message): which unfinished work should continue? Get 1-10 items, each small enough for ONE run (about 15 minutes). Ask what is forbidden beyond the defaults, and whether they want different usage limits (defaults: stop when the 5-hour window is at 60% or more, or the weekly window is at 75% or more).
+1. Ask the user (one message): which unfinished work should continue? Get 1-10 items, each small enough for ONE run (about 15 minutes). Ask what is forbidden beyond the defaults, and whether they want different usage limits (defaults: stop when the 5-hour window is at 60% or more, or the weekly window is at 75% or more) and whether there are times of day when background runs must stay away (for example when another task uses the browser): those become QUIET_WINDOWS (local time, HH:MM-HH:MM, comma separated); default none.
 2. Show the draft queue file in chat and write it to `Jobs/resume_queue.md` (create `Jobs/` if needed; if the file exists, ask before replacing it and archive the old one first). Get the current time from the shell, never from memory: `date -u +"%Y-%m-%d %H:%M"` (in native Windows PowerShell use `[DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm')` instead: there `date -u` prints local time). Every log line starts with `- ` and that time followed by `UTC`. Use exactly this layout:
 
 ```
@@ -16,8 +16,11 @@ Goal: a queue file in the project plus (optionally) a scheduled task that runs `
 STATUS: ACTIVE
 (Line 2 of this file is the only STATUS line the run reads. When every item is finished or blocked, the run changes it to the word DONE and stops; you can do the same by hand as a kill switch.)
 LIMITS: 5h=60 week=75
+QUIET_WINDOWS: none
 
 ## Gate (every run, before anything else)
+- Order: the run reads only the header (first 15 lines), checks QUIET_WINDOWS, then usage, and only then reads the rest of this file. Keep STATUS, LIMITS and QUIET_WINDOWS in the first 15 lines.
+- QUIET_WINDOWS (optional): local-time ranges such as `08:30-09:20, 12:30-13:20` (HH:MM-HH:MM, end excluded, a range like 23:30-00:30 crosses midnight). Inside one, the run stops at once and writes nothing. A malformed value makes the run do nothing and say so. `none` or empty means no windows.
 - Usage at or above the LIMITS line (5-hour window / weekly all-models window, in percent): write ONE dated log line with the numbers and the reset time, then stop.
 - Another session on this project is running right now, or the last log line is under 20 minutes old (times in UTC): stop.
 - The run takes an atomic lock (`mkdir Jobs/.nightshift.lock`) before touching an item and removes it at the end; if the lock exists and is under 30 minutes old, another run is working: stop. A crashed run leaves an empty lock folder behind: after 30 minutes the next run clears it. If the lock is a file, a junction/symlink, not empty, or dated in the future, a run never clears it: it stops and logs one line, and you must delete it yourself. You can also delete the folder yourself to unblock sooner. A log line dated in the future is reported once and ignored for the 20-minute check.

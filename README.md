@@ -1,4 +1,4 @@
-# nightshift — a Claude Code plugin (v0.1.5)
+# nightshift — a Claude Code plugin (v0.1.6)
 
 Keeps unfinished work moving while you are away, without eating your whole plan. A queue file lists small items; an hourly scheduled run does the first undone item locally, logs it, and stops. Before every run it checks your usage and stops if the 5-hour window is at 60% or more or the weekly window at 75% or more (editable in the queue file).
 
@@ -16,6 +16,12 @@ Skills only: no scripts, no network code, nothing installed.
 - **Idle cost.** A run that finds nothing to do (STATUS DONE, usage high, another session active) still starts a session and uses a little usage.
 - **Kill switch.** Set `STATUS: DONE` in the queue file, or disable the scheduled task. Finished queues stop by themselves.
 - Usage gating needs the session-management `get_usage` tool (Claude desktop app). Without it the run falls back to stopping at the first usage-limit reply and continuing next time.
+
+## Quiet windows and gate order (0.1.6)
+- **Optional `QUIET_WINDOWS:` line** in the queue header (line 5 in the template): local-time ranges, for example `QUIET_WINDOWS: 08:30-09:20, 12:30-13:20`. Format is exactly `HH:MM-HH:MM` (24-hour, end excluded); a range such as `23:30-00:30` crosses midnight; ranges may overlap. Inside a window the run stops at once and writes nothing (no log line, no lock): the quietest choice, and a log line would only make the next run stop on the 20-minute check. `none`, an empty value or no line means no windows, exactly as in 0.1.5.
+- **A malformed value fails closed:** the run does nothing (writes nothing) and says in its reply that the line is malformed. Numbers like `830-920`, an en dash, `24:00`, a zero-length range, or two `QUIET_WINDOWS:` lines are malformed. If the local time cannot be read while windows are set, the run also does nothing.
+- **Gate order:** the run reads only the first 15 lines of the queue (STATUS, LIMITS, QUIET_WINDOWS), checks the quiet windows, then usage; only then does it read the rest of the queue and project rules. On a usage stop it reads just the last 10 lines of the queue to add the one dated log line. Reading the header first is unavoidable because the thresholds live in the queue.
+- **Auto-DONE:** when every item under `## Items` is DONE or BLOCKED, the run changes line 2 from exactly `STATUS: ACTIVE` to `STATUS: DONE` and says so. If line 2 is anything else (trailing spaces, other text) it rewrites nothing and says so. Idle scheduled runs still fire until you disable the task.
 
 ## With persistent-memory
 If the project has `MDs/HANDOVER.md` and a Jobs log, each run updates them last (archiving first). Otherwise the queue file alone is the record.
