@@ -15,31 +15,112 @@ def front(text):
 # ---- reference implementation of the rules written in skills/run/SKILL.md (spec check, not shipped code) ----
 HEADER_LINES = 15
 _ENTRY = re.compile(r"([0-9]{2}):([0-9]{2})-([0-9]{2}):([0-9]{2})")
+_DIGITS = "0-9٠-٩۰-۹"
+FENCE = re.compile(r"^[ \t]*(```|~~~)")
+ITEM = re.compile(r"^[ \t]*(?:[-*+]|[%s]+[.)])[ \t]*\[( |x|X)\](.*)$" % _DIGITS)
+LISTLINE = re.compile(r"^[ \t]*(?:[-*+]|[%s]+[.)])(?:[ \t]|\[)" % _DIGITS)
+NUMBERED = re.compile(r"^[ \t]*[%s]+[.)]" % _DIGITS)
+NEAR = {
+    "QUIET_WINDOWS": re.compile(r"(?i)^[^\w\n]*quiet[_ ]?windows[^\w\n]*[:：]"),
+    "LIMITS": re.compile(r"(?i)^[^\w\n]*limits[^\w\n]*[:：]"),
+}
+ITEMS_END = re.compile(r"^## (Log|Operator routine)\b")
 
 
-def parse_quiet(queue_text):
-    """Returns ('none', []), ('malformed', None) or ('ok', [(start_min, end_min), ...])."""
-    header = queue_text.splitlines()[:HEADER_LINES]
-    found = [l for l in header if l.startswith("QUIET_WINDOWS:")]
-    if not found:
+def split_lines(text):
+    """The one splitter: only \\n splits, one trailing \\r is dropped (U+2028, lone CR do not split)."""
+    return [l[:-1] if l.endswith("\r") else l for l in text.split("\n")]
+
+
+def fence_map(lines):
+    """True for every line that is a fence line or inside a fence; also returns 'still open at the end'."""
+    out, ch = [], None
+    for l in lines:
+        m = FENCE.match(l)
+        if m:
+            out.append(True)
+            if ch is None:
+                ch = m.group(1)
+            elif ch == m.group(1):
+                ch = None
+        else:
+            out.append(ch is not None)
+    return out, ch is not None
+
+
+def header_end(lines):
+    fm, _ = fence_map(lines[:HEADER_LINES])
+    for i, l in enumerate(lines[:HEADER_LINES]):
+        if l.startswith("## ") or fm[i] or LISTLINE.match(l):
+            return i
+    return min(len(lines), HEADER_LINES)
+
+
+def items_heading(lines, fm):
+    for i, l in enumerate(lines):
+        if not fm[i] and l.rstrip(" \t") == "## Items":
+            return i
+    return None
+
+
+def config_scan(text, whole=True):
+    """Returns dict(quiet=value|None, limits=value|None, errors=[reasons]). whole=False is step 1 (15 lines only)."""
+    lines = split_lines(text)
+    if not whole:
+        lines = lines[:HEADER_LINES]
+    fm, _ = fence_map(lines)
+    he = header_end(lines)
+    errors, found = [], {"QUIET_WINDOWS": [], "LIMITS": []}
+    for i in range(he):
+        for key in found:
+            if lines[i].startswith(key + ":"):
+                found[key].append(lines[i][len(key) + 1:])
+            elif NEAR[key].match(lines[i]):
+                errors.append("%s is misplaced or misspelled: %s" % (key, lines[i][:40]))
+    for key, vals in found.items():
+        if len(vals) > 1:
+            errors.append("%s appears more than once in the header" % key)
+    ih = items_heading(lines, fm)
+    limit_idx = ih if ih is not None else len(lines)
+    fallback = None
+    for i in range(he, len(lines)):
+        if fm[i] or ITEM.match(lines[i]):
+            continue
+        if not (i < HEADER_LINES or (ih is not None and i < ih)):
+            continue
+        for key in found:
+            if lines[i].startswith(key + ":") or NEAR[key].match(lines[i]):
+                if key == "LIMITS" and lines[i].startswith("LIMITS:") and not found["LIMITS"] and i < limit_idx and fallback is None:
+                    fallback = lines[i][len("LIMITS:"):]
+                else:
+                    errors.append("%s is misplaced or misspelled: %s" % (key, lines[i][:40]))
+    q = found["QUIET_WINDOWS"][0] if len(found["QUIET_WINDOWS"]) == 1 else None
+    lim = found["LIMITS"][0] if len(found["LIMITS"]) == 1 else fallback
+    return {"quiet": q, "limits": lim, "errors": errors}
+
+
+def parse_quiet(queue_text, whole=True):
+    """Returns ('none', []), ('malformed', reason) or ('ok', [(start_min, end_min), ...])."""
+    cfg = config_scan(queue_text, whole)
+    if cfg["errors"]:
+        return ("malformed", cfg["errors"][0])
+    value = cfg["quiet"]
+    if value is None:
         return ("none", [])
-    if len(found) > 1:
-        return ("malformed", None)
-    value = found[0][len("QUIET_WINDOWS:"):].strip()
+    value = value.strip(" \t")
     if value == "" or value.lower() == "none":
         return ("none", [])
+    if "`" in value:
+        return ("malformed", "QUIET_WINDOWS value contains backticks, write it without them")
     wins = []
     for entry in value.split(","):
-        m = _ENTRY.fullmatch(entry.strip())
+        m = _ENTRY.fullmatch(entry.strip(" \t"))
         if not m:
-            return ("malformed", None)
+            return ("malformed", "QUIET_WINDOWS is malformed (%s)" % value)
         h1, m1, h2, m2 = (int(x) for x in m.groups())
-        if h1 > 23 or h2 > 23 or m1 > 59 or m2 > 59:
-            return ("malformed", None)
-        a, b = h1 * 60 + m1, h2 * 60 + m2
-        if a == b:
-            return ("malformed", None)
-        wins.append((a, b))
+        if h1 > 23 or h2 > 23 or m1 > 59 or m2 > 59 or h1 * 60 + m1 == h2 * 60 + m2:
+            return ("malformed", "QUIET_WINDOWS is malformed (%s)" % value)
+        wins.append((h1 * 60 + m1, h2 * 60 + m2))
     return ("ok", wins)
 
 
@@ -52,49 +133,96 @@ def in_quiet(wins, hhmm):
     return False
 
 
+_KILL = re.compile(r"(?i)^\W*status\W*:?\s*done\b")
+
+
 def run_gate(queue_text, hhmm):
-    """'stop-done' | 'stop-malformed' | 'stop-quiet' | 'continue' (what steps 1-2 decide)."""
-    lines = queue_text.splitlines()
-    if len(lines) > 1 and lines[1].rstrip() == "STATUS: DONE":
+    """'stop-done' | 'stop-config-error' | 'stop-quiet' | 'continue' (what steps 1-2 decide)."""
+    lines = split_lines(queue_text)
+    if len(lines) > 1 and _KILL.match(lines[1]):
         return "stop-done"
-    kind, wins = parse_quiet(queue_text)
+    kind, wins = parse_quiet(queue_text, whole=False)
     if kind == "malformed":
-        return "stop-malformed"
-    if kind == "ok" and (hhmm is None or in_quiet(wins, hhmm)):
-        return "stop-quiet"
+        return "stop-config-error"
+    if kind == "ok":
+        if hhmm is None:
+            return "stop-config-error"  # clock unreadable
+        if in_quiet(wins, hhmm):
+            return "stop-quiet"
     return "continue"
 
 
-_ITEM = re.compile(r"^[0-9]+\.\s")
+def may_write_now(queue_text, hhmm):
+    """Step 5 (after the lock), before any browser step, and step 7 (before the final write): same check, fresh clock."""
+    return run_gate(queue_text, hhmm) == "continue"
+
+
+def config_error_line_needed(last_log_line, reason):
+    """Dedupe: append CONFIG-ERROR only if the last log line is not already that same CONFIG-ERROR."""
+    return not (last_log_line is not None and last_log_line.endswith("CONFIG-ERROR: " + reason))
+
+
+_LOGTIME = re.compile(r"^- ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2})( UTC)?")
+
+
+def spacing_check(log_lines, now_utc, now_local):
+    """Step 4 log-age check. Returns 'recent' | 'ok' | 'future' | ('config-error', reason)."""
+    from datetime import datetime
+    real = [l for l in log_lines if l.startswith("- ") and " CONFIG-ERROR: " not in l]
+    if not real:
+        return "ok"
+    last = real[-1]
+    m = _LOGTIME.match(last)
+    if not m:
+        return ("config-error", "last log line has no parseable time: %s" % last[:40])
+    now = datetime.strptime(now_utc if m.group(2) else now_local, "%Y-%m-%d %H:%M")
+    then = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M")
+    if then > now:
+        return "future"
+    return "recent" if (now - then).total_seconds() < 20 * 60 else "ok"
+
+
+def items_state(text):
+    """The single Item definition (steps 5 and 7b). Returns dict(items=[(kind, line)], first_open, unclosed_fence, numbered_nobox)."""
+    lines = split_lines(text)
+    fm, unclosed = fence_map(lines)
+    in_items, items, numbered_nobox = False, [], 0
+    for i, l in enumerate(lines):
+        if fm[i]:
+            continue
+        if l.rstrip(" \t") == "## Items":
+            in_items = True
+            continue
+        if ITEMS_END.match(l):
+            in_items = False
+            continue
+        if not in_items:
+            continue
+        m = ITEM.match(l)
+        if m:
+            box, rest = m.group(1), m.group(2).lstrip(" \t")
+            if box in "xX":
+                kind = "done" if re.match(r"DONE(?!\w)", rest) else "unrecognised"
+            else:
+                kind = "blocked" if re.match(r"BLOCKED(?!\w)", rest) else "open"
+            items.append((kind, l))
+        elif NUMBERED.match(l):
+            numbered_nobox += 1
+    first_open = next((l for k, l in items if k == "open"), None)
+    return {"items": items, "first_open": first_open, "unclosed_fence": unclosed, "numbered_nobox": numbered_nobox}
 
 
 def auto_done(text):
     """Step 7b. Returns the new text, or None when nothing may be rewritten."""
     lines = text.split("\n")
-    if len(lines) < 2:
+    if len(lines) < 2 or lines[1].rstrip("\r") != "STATUS: ACTIVE":
         return None
-    l2 = lines[1]
-    if l2.rstrip("\r") != "STATUS: ACTIVE":
+    st = items_state(text)
+    if st["unclosed_fence"] or st["numbered_nobox"] or not st["items"]:
         return None
-    in_items, fenced, n = False, False, 0
-    for raw in lines[2:]:
-        l = raw.rstrip("\r")
-        if l.startswith("```"):
-            fenced = not fenced
-            continue
-        if fenced:
-            continue
-        if l.startswith("## "):
-            in_items = l.strip() == "## Items"
-            continue
-        if in_items and _ITEM.match(l):
-            if re.match(r"^[0-9]+\. \[x\] DONE", l) or re.match(r"^[0-9]+\. \[ \] BLOCKED", l):
-                n += 1
-            else:
-                return None
-    if n == 0:
+    if any(k not in ("done", "blocked") for k, _ in st["items"]):
         return None
-    lines[1] = "STATUS: DONE" + ("\r" if l2.endswith("\r") else "")
+    lines[1] = "STATUS: DONE" + ("\r" if lines[1].endswith("\r") else "")
     return "\n".join(lines)
 
 
@@ -124,7 +252,7 @@ class NightshiftTests(unittest.TestCase):
 
     def test_run_rules(self):
         t = read("skills/run/SKILL.md")
-        for needle in ("DONE, stop immediately", "get_usage", "under 20 minutes", "FIRST item", "never push", "BLOCKED", "STATUS: DONE"):
+        for needle in ("stop immediately and do nothing", "get_usage", "under 20 minutes", "FIRST item", "never push", "BLOCKED", "STATUS: DONE"):
             self.assertIn(needle, t)
 
     def test_extra_rules(self):
@@ -249,12 +377,12 @@ class NightshiftTests(unittest.TestCase):
                "٠٨:30-09:20", "true", "0", "08:30-09:2O"]
         for b in bad:
             self.assertEqual(parse_quiet(self.q("QUIET_WINDOWS: " + b))[0], "malformed", b)
-            self.assertEqual(run_gate(self.q("QUIET_WINDOWS: " + b), "03:00"), "stop-malformed", b)
+            self.assertEqual(run_gate(self.q("QUIET_WINDOWS: " + b), "03:00"), "stop-config-error", b)
         dup = self.q("QUIET_WINDOWS: 08:30-09:20\nQUIET_WINDOWS: 12:00-13:00")
-        self.assertEqual(run_gate(dup, "03:00"), "stop-malformed")
+        self.assertEqual(run_gate(dup, "03:00"), "stop-config-error")
 
     def test_quiet_unreadable_time_fails_closed(self):
-        self.assertEqual(run_gate(self.q("QUIET_WINDOWS: 08:30-09:20"), None), "stop-quiet")
+        self.assertEqual(run_gate(self.q("QUIET_WINDOWS: 08:30-09:20"), None), "stop-config-error")  # clock unreadable: CONFIG-ERROR
         self.assertEqual(run_gate(self.q("QUIET_WINDOWS: none"), None), "continue")
 
     def test_quiet_absent_empty_none_equal_old_behaviour(self):
@@ -289,14 +417,14 @@ class NightshiftTests(unittest.TestCase):
         self.assertIn("only if the state changed", usage)
         self.assertNotIn("Read `Jobs/resume_queue.md` fully", r[:r.index("4. Remaining gates")])
         head = r[r.index("1. Header only."):r.index("2. Quiet windows")]
-        for needle in ("first 15 lines", "Do not read the Gate section", "above the `## Items` heading"):
+        for needle in ("first 15 lines", "reads no other file", "above the `## Items` heading"):
             self.assertIn(needle, head)
 
     def test_run_skill_quiet_window_text(self):
         r = read("skills/run/SKILL.md")
-        for needle in ("QUIET_WINDOWS", "fails closed", "write nothing to any file", "write NOTHING", "The end is exclusive",
+        for needle in ("QUIET_WINDOWS", "fails closed", "does nothing but the one CONFIG-ERROR line", "write NOTHING", "The end is exclusive",
                        "crosses midnight", "(Get-Date).ToString('HH:mm')", 'date +"%H:%M"', "more than one `QUIET_WINDOWS:` line",
-                       "exactly as before 0.1.6", "never from memory"):
+                       "A <= t < B", "ASCII digits", "ASCII spaces and tabs", "never from memory", "CONFIG-ERROR"):
             self.assertIn(needle, r)
 
     def test_existing_safety_rules_kept(self):
@@ -313,6 +441,9 @@ class NightshiftTests(unittest.TestCase):
         self.assertEqual(parse_quiet(tpl), ("none", []))
         self.assertLess(len(tpl[:tpl.index("QUIET_WINDOWS: none")].splitlines()), HEADER_LINES)
         self.assertIn("QUIET_WINDOWS", s.split("## Gate")[1])
+        self.assertEqual(config_scan(tpl)["errors"], [])
+        bullet = [l for l in tpl.split("\n") if l.startswith("- QUIET_WINDOWS")][0]
+        self.assertNotIn("`", bullet)  # no backtick example to paste into the key line
 
     def test_auto_done_happy_and_exact(self):
         src = self.q(items="1. [x] DONE a\n2. [ ] BLOCKED: needs a human\n3. [x] DONE   ")
@@ -358,8 +489,8 @@ class NightshiftTests(unittest.TestCase):
     def test_run_skill_auto_done_text(self):
         r = read("skills/run/SKILL.md")
         for needle in ("7b. Auto-DONE", "exactly `STATUS: ACTIVE`", "exactly `STATUS: DONE`", "Change only that line",
-                       "Zero items never counts as finished", "outside fenced code blocks", "take the same lock first",
-                       "there is no atomic file replace", "line endings, BOM, trailing spaces"):
+                       "When unsure, never mark DONE", "outside fences", "take the same lock first",
+                       "there is no atomic file replace", "line endings, BOM, non-ASCII text, trailing spaces"):
             self.assertIn(needle, r)
         self.assertLess(r.index("Tick the item"), r.index("7b. Auto-DONE"))
         self.assertLess(r.index("7b. Auto-DONE"), r.index("Operator routine, LAST"))
@@ -369,6 +500,184 @@ class NightshiftTests(unittest.TestCase):
             t = read(f)
             for needle in ("QUIET_WINDOWS", "08:30-09:20", "23:30-00:30"):
                 self.assertIn(needle, t, f)
+
+    # ---------------- fix batch after red-team round 4 (still 0.1.6) ----------------
+    def test_m1_one_item_definition_blocks_auto_done(self):
+        done = "1. [x] DONE a\n"
+        for extra in ("- [ ] open bullet task", "   2. [ ] open indented", "2) [ ] open", "2.[ ] open", "\u0662. [ ] open", "\u06f2. [ ] open",
+                      "2. [ ] BLOCKEDNOT, still open", "* [ ] star", "+ [ ] plus", "\t- [ ] tabbed", "3. todo without box"):
+            self.assertIsNone(auto_done(self.q(items=done + extra)), extra)
+        self.assertIsNone(auto_done(self.q(items="1. [x] DONEish? not verified")))
+        self.assertIsNone(auto_done(self.q(items="1. [x] fine but no token")))
+        self.assertIsNone(auto_done(self.q(items=done + "```\n2. [ ] open real")))  # unclosed fence: cannot decide
+        self.assertIsNone(auto_done(self.q(items=done + "~~~\n2. [ ] open real")))
+        self.assertIsNone(auto_done(self.q(items=done + "## notes for item 2\n2. [ ] open after a ## line")))
+        # step 5 uses the same definition: the first open item is the bullet / indented / Arabic-Indic line
+        for extra, want in (("- [ ] open bullet task", "- [ ] open bullet task"), ("   2. [ ] open indented", "   2. [ ] open indented"),
+                            ("\u0662. [ ] open", "\u0662. [ ] open"), ("2) [ ] open", "2) [ ] open")):
+            self.assertEqual(items_state(self.q(items=done + extra))["first_open"], want)
+        self.assertEqual(items_state(self.q(items="1. [ ] BLOCKEDNOT x"))["first_open"], "1. [ ] BLOCKEDNOT x")
+        self.assertIsNone(items_state(self.q(items="1. [x] DONEish"))["first_open"])  # unrecognised is never picked
+        self.assertEqual(items_state(self.q(items="1. [ ] BLOCKED: why\n2. [ ] next"))["first_open"], "2. [ ] next")
+        self.assertEqual(items_state(self.q(items="```\n1. [ ] example\n```\n2. [ ] real"))["first_open"], "2. [ ] real")
+
+    def test_m1_positive_forms_and_tokens(self):
+        for items in ("- [x] DONE a\n- [ ] BLOCKED: needs human", "1) [X] DONE a", "   1. [x] DONE: a\n\u0662. [ ] BLOCKED", "1. [x] DONE", "1. [ ] BLOCKED"):
+            self.assertIsNotNone(auto_done(self.q(items=items)), items)
+        self.assertIsNone(auto_done(self.q(items="1. [x] done lowercase")))
+        self.assertIsNone(auto_done(self.q(items="1. [ ] blocked lowercase")))
+        self.assertIsNone(auto_done(self.q(items="")))
+        # a closed fence anywhere is fine, an unclosed one anywhere (even above Items) refuses
+        self.assertIsNotNone(auto_done(self.q(items="1. [x] DONE a").replace("- x", "- x\n```\nexample\n```")))
+        self.assertIsNone(auto_done(self.q(items="1. [x] DONE a").replace("- x", "- x\n```\nexample")))
+
+    def test_m1_items_section_ends_only_at_log_or_operator(self):
+        src = self.q(items="1. [x] DONE a\n## notes\n2. [ ] open").replace("## Log", "## Operator routine\nx\n## Log")
+        self.assertIsNone(auto_done(src))  # the ## notes line did not end Items
+        src = self.q(items="1. [x] DONE a").replace("## Log", "## Operator routine\n2. [ ] not an item\n## Log")
+        self.assertIsNotNone(auto_done(src))
+
+    def test_m2_config_error_rules(self):
+        r = read("skills/run/SKILL.md")
+        for needle in ("CONFIG-ERROR: <reason>", "no hourly spam", "ONE line", "CONFIG-ERROR lines are ignored here", "rejected, not stripped",
+                       "QUIET_WINDOWS value contains backticks", "unknown-time", "clock unreadable"):
+            self.assertIn(needle, r)
+        self.assertTrue(config_error_line_needed("- 2026-11-17 10:00 UTC item 1 done", "x"))
+        self.assertTrue(config_error_line_needed(None, "x"))
+        self.assertFalse(config_error_line_needed("- 2026-11-17 10:00 UTC CONFIG-ERROR: x", "x"))
+        self.assertTrue(config_error_line_needed("- 2026-11-17 10:00 UTC CONFIG-ERROR: y", "x"))
+        # backticks pasted from the README example are rejected with a clear message
+        kind, why = parse_quiet(self.q("QUIET_WINDOWS: `08:30-09:20`"))
+        self.assertEqual(kind, "malformed")
+        self.assertIn("backticks", why)
+        for bad in ("08:30-09:20 # publishing", "08:30:00-09:20:00", "08:30-09:20\u00a0", "\u00a008:30-09:20", "24:00-01:00", "00:00-00:00"):
+            self.assertEqual(parse_quiet(self.q("QUIET_WINDOWS: " + bad))[0], "malformed", repr(bad))
+        # tabs and ASCII spaces are accepted
+        self.assertEqual(parse_quiet(self.q("QUIET_WINDOWS: \t08:30-09:20 ,\t12:30-13:20\t"))[0], "ok")
+
+    def test_m2_spacing_check_ignores_config_error_and_n3(self):
+        now_u, now_l = "2026-11-17 10:10", "2026-11-17 13:10"
+        ce = "- 2026-11-17 10:05 UTC CONFIG-ERROR: QUIET_WINDOWS is malformed (x)"
+        self.assertEqual(spacing_check(["- 2026-11-17 10:00 UTC did x", ce], now_u, now_l), "recent")  # CE line is skipped, 10:00 is recent
+        self.assertEqual(spacing_check(["- 2026-11-17 09:00 UTC did x", ce], now_u, now_l), "ok")  # a fresh CE line does not block
+        self.assertEqual(spacing_check([ce], now_u, now_l), "ok")
+        self.assertEqual(spacing_check([], now_u, now_l), "ok")
+        self.assertEqual(spacing_check(["- 2026-11-17 10:20 UTC later"], now_u, now_l), "future")
+        self.assertEqual(spacing_check(["- 2026-11-17 13:00 old local line"], now_u, now_l), "recent")  # no UTC: compared with local time
+        # N3: an unparseable last line is a CONFIG-ERROR, not a switched-off check
+        res = spacing_check(["- 2026-11-17 10:00 UTC did x", "- note without a time"], now_u, now_l)
+        self.assertEqual(res[0], "config-error")
+        self.assertIn("no parseable time", res[1])
+        r = read("skills/run/SKILL.md")
+        self.assertIn("it is NOT ignored", r)
+        self.assertNotIn("ignore this check and say so", r)
+
+    def test_m3_quiet_window_rechecked(self):
+        qt = self.q("QUIET_WINDOWS: 08:30-09:20")
+        self.assertTrue(may_write_now(qt, "08:25"))   # run started here
+        self.assertFalse(may_write_now(qt, "08:31"))  # 15 minutes later, a window has begun
+        self.assertFalse(may_write_now(qt, None))
+        r = read("skills/run/SKILL.md")
+        for needle in ("re-check the quiet window", "before any browser or other GUI step", "before the final write, re-check the quiet window",
+                       "leave the item unticked", "not reverted"):
+            self.assertIn(needle, r)
+        self.assertLess(r.index("Only after `mkdir` succeeds"), r.index("RUNNING item N"))
+        self.assertLess(r.index("re-check the quiet window (step 2"), r.index("RUNNING item N"))
+        self.assertLess(r.index("before the final write"), r.index("7b. Auto-DONE"))
+
+    def test_m4_header_is_strict(self):
+        # A: key-looking line after an item / after ## Items is not configuration and is not silently ignored
+        a = "# Q\nSTATUS: ACTIVE\n## Items\n1. [ ] real work\nQUIET_WINDOWS: 00:00-23:59\n## Log\n"
+        self.assertEqual(run_gate(a, "12:00"), "stop-config-error")
+        b = "# Q\nSTATUS: ACTIVE\nQUIET_WINDOWS: none\n## Items\n1. [ ] real work\nQUIET_WINDOWS: 00:00-23:59\n## Log\n"
+        self.assertEqual(run_gate(b, "12:00"), "stop-config-error")
+        # B: a fenced example in the header under a real none line is ignored
+        fb = "# Q\nSTATUS: ACTIVE\nQUIET_WINDOWS: none\n```\nQUIET_WINDOWS: 08:30-09:20\n```\n## Items\n1. [ ] x\n"
+        self.assertEqual(run_gate(fb, "08:40"), "continue")
+        self.assertEqual(config_scan(fb)["errors"], [])
+        # C: U+2028 does not split a line: the text stays inside the item line
+        c = "# Q\nSTATUS: ACTIVE\nQUIET_WINDOWS: none\n## Items\n1. [ ] a \u2028QUIET_WINDOWS: 00:00-23:59\n"
+        self.assertEqual(run_gate(c, "12:00"), "continue")
+        self.assertEqual(config_scan(c)["errors"], [])
+        # LIMITS inside an item or after the header never counts; a legit hand-written LIMITS above Items does
+        lim = "# Q\nSTATUS: ACTIVE\n## Items\n1. [ ] a\nLIMITS: 5h=90 week=90\n"
+        cfg = config_scan(lim)
+        self.assertIsNone(cfg["limits"])
+        self.assertTrue(cfg["errors"])
+        hand = "# Q\nSTATUS: ACTIVE\nsome words\n## Gate\nLIMITS: 5h=50 week=60\n## Items\n1. [ ] a\n"
+        cfg = config_scan(hand)
+        self.assertEqual(cfg["limits"].strip(), "5h=50 week=60")
+        self.assertEqual(cfg["errors"], [])
+        # a normal template queue is clean
+        self.assertEqual(config_scan(self.q())["errors"], [])
+        self.assertEqual(config_scan(self.q())["limits"], " 5h=60 week=75")
+
+    def test_m4_near_miss_keys_fail_closed(self):
+        near = ["quiet_windows: 00:00-23:59", " QUIET_WINDOWS: 00:00-23:59", "- QUIET_WINDOWS: 00:00-23:59", "**QUIET_WINDOWS:** 00:00-23:59",
+                "QUIET_WINDOWS : 00:00-23:59", "QUIET_WINDOWS\uff1a00:00-23:59", "Quiet Windows: 00:00-23:59", "\tQUIET_WINDOWS: 00:00-23:59"]
+        for n in near:
+            qt = "# Q\nSTATUS: ACTIVE\n%s\n## Items\n1. [ ] a\n" % n
+            self.assertEqual(run_gate(qt, "12:00"), "stop-config-error", n)
+            self.assertEqual(parse_quiet(qt)[0], "malformed", n)
+        # near-miss LIMITS too
+        self.assertTrue(config_scan("# Q\nSTATUS: ACTIVE\nlimits: 5h=90\n## Items\n")["errors"])
+        # key placed after the header, still in the first 15 lines
+        qt = "# Q\nSTATUS: ACTIVE\n## Gate\nnotes\nQUIET_WINDOWS: 08:30-09:20\n## Items\n1. [ ] a\n"
+        self.assertEqual(run_gate(qt, "12:00"), "stop-config-error")
+        # whole-file re-scan (step 4) catches a key placed below line 15 but above ## Items
+        long_gate = "# Q\nSTATUS: ACTIVE\n## Gate\n" + "filler\n" * 20 + "QUIET_WINDOWS: 08:30-09:20\n## Items\n1. [ ] a\n"
+        self.assertEqual(run_gate(long_gate, "12:00"), "continue")  # step 1 only sees 15 lines
+        self.assertTrue(config_scan(long_gate)["errors"])  # step 4 sees it
+        # a log line or an item mentioning the key is not a key line
+        ok = self.q(items="1. [ ] explain QUIET_WINDOWS: in the docs\n- [ ] quiet windows: note") + "- 2026-11-17 UTC QUIET_WINDOWS: x\n"
+        self.assertEqual(config_scan(ok)["errors"], [])
+        r = read("skills/run/SKILL.md")
+        for needle in ("Misplaced or misspelled key", "fullwidth colon", "before the first `## ` heading", "never more than the first 15 lines"):
+            self.assertIn(needle, r)
+
+    def test_m5_edit_tool_named(self):
+        r = read("skills/run/SKILL.md")
+        for needle in ("Claude Code Edit tool", "Set-Content", "Out-File", "sed -i", "BOM", "non-ASCII", "using the Edit tool on that exact line",
+                       "If the Edit tool is not available, write nothing"):
+            self.assertIn(needle, r)
+        # what the Edit-tool rewrite must preserve, checked against the reference: BOM, CRLF, Arabic, no final newline
+        src = "\ufeff# Resume queue\r\nSTATUS: ACTIVE\r\n## Items\r\n1. [x] DONE \u0645\u0647\u0645\u0629"
+        out = auto_done(src)
+        self.assertEqual(out, src.replace("STATUS: ACTIVE", "STATUS: DONE"))
+        self.assertEqual(out.encode("utf-8").count(b"\r\n"), 3)
+        self.assertFalse(out.endswith("\n"))
+
+    def test_l_fixes(self):
+        # L3: one splitter (U+2028 and lone CR never split a line)
+        t1 = "# Resume queue\u2028STATUS: DONE\nSTATUS: ACTIVE\n## Items\n1. [x] DONE a"
+        self.assertEqual(run_gate(t1, "10:00"), "continue")
+        self.assertEqual(auto_done(t1).split("\n")[1], "STATUS: DONE")
+        self.assertEqual(len(split_lines("a\rb\u2028c\r\nd")), 2)
+        # L9: kill-switch variants stop (fail-closed direction); ACTIVE with DONE later in the line does not
+        for l2 in ("STATUS: DONE (paused)", "STATUS:DONE", "STATUS: done", "STATUS:\tDONE", "**STATUS: DONE**", "STATUS: DONE   "):
+            self.assertEqual(run_gate("# Q\n%s\n## Items\n1. [ ] a\n" % l2, "10:00"), "stop-done", l2)
+        for l2 in ("STATUS: ACTIVE (not DONE yet)", "STATUS: ACTIVE", "STATUS: DONEish"):
+            self.assertEqual(run_gate("# Q\n%s\n## Items\n1. [ ] a\n" % l2, "10:00"), "continue", l2)
+        # L7: the all-day form covers every minute, 00:00-23:59 leaves 23:59 open
+        _, w = parse_quiet(self.q("QUIET_WINDOWS: 00:00-12:00, 12:00-00:00"))
+        self.assertTrue(all(in_quiet(w, "%02d:%02d" % (h, m)) for h in range(24) for m in range(60)))
+        _, w = parse_quiet(self.q("QUIET_WINDOWS: 00:00-23:59"))
+        self.assertFalse(in_quiet(w, "23:59"))
+        r = read("skills/run/SKILL.md")
+        for needle in ("00:00-12:00, 12:00-00:00", "a cloud routine runs in UTC", "lists each BLOCKED item with its reason",
+                       "(then continue with steps 7 and 7b in this same run", "If line 2 is already `STATUS: DONE`, do nothing and log nothing",
+                       "`no items found under ## Items`", "Split the file on `\\n` only"):
+            self.assertIn(needle, r)
+        self.assertEqual(r.count("Trailing spaces after DONE are ignored"), 0)
+        self.assertNotIn("Do not read the Gate section", r)
+        self.assertNotIn("exactly as before 0.1.6", r)
+
+    def test_changelog_is_honest(self):
+        c = read("CHANGELOG.md").split("## 0.1.5")[0]
+        self.assertNotIn("behaves as in 0.1.5", c)
+        self.assertNotIn("identical to 0.1.5", c)
+        for needle in ("differs from 0.1.5", "CONFIG-ERROR", "Known", "needle-checked", "R4-L4"):
+            self.assertIn(needle, c)
 
 
 if __name__ == "__main__":
