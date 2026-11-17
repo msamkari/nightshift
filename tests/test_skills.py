@@ -20,6 +20,7 @@ FENCE = re.compile(r"^[ \t]*(```|~~~)")
 ITEM = re.compile(r"^[ \t]*(?:[-*+]|[%s]+[.)])[ \t]*\[( |x|X)\](.*)$" % _DIGITS)
 LISTLINE = re.compile(r"^[ \t]*(?:[-*+]|[%s]+[.)])(?:[ \t]|\[)" % _DIGITS)
 NUMBERED = re.compile(r"^[ \t]*[%s]+[.)]" % _DIGITS)
+BRACKET = re.compile(r"^[ \t]*(?:[-*+]|[%s]+[.)])[ \t]*\[" % _DIGITS)
 NEAR = {
     "QUIET_WINDOWS": re.compile(r"(?i)^[^\w\n]*quiet[_ ]?windows[^\w\n]*[:：]"),
     "LIMITS": re.compile(r"(?i)^[^\w\n]*limits[^\w\n]*[:：]"),
@@ -81,8 +82,6 @@ def config_scan(text, whole=True):
         if len(vals) > 1:
             errors.append("%s appears more than once in the header" % key)
     ih = items_heading(lines, fm)
-    limit_idx = ih if ih is not None else len(lines)
-    fallback = None
     for i in range(he, len(lines)):
         if fm[i] or ITEM.match(lines[i]):
             continue
@@ -90,12 +89,9 @@ def config_scan(text, whole=True):
             continue
         for key in found:
             if lines[i].startswith(key + ":") or NEAR[key].match(lines[i]):
-                if key == "LIMITS" and lines[i].startswith("LIMITS:") and not found["LIMITS"] and i < limit_idx and fallback is None:
-                    fallback = lines[i][len("LIMITS:"):]
-                else:
-                    errors.append("%s is misplaced or misspelled: %s" % (key, lines[i][:40]))
+                errors.append("%s is misplaced or misspelled: %s" % (key, lines[i][:40]))
     q = found["QUIET_WINDOWS"][0] if len(found["QUIET_WINDOWS"]) == 1 else None
-    lim = found["LIMITS"][0] if len(found["LIMITS"]) == 1 else fallback
+    lim = found["LIMITS"][0] if len(found["LIMITS"]) == 1 else None
     return {"quiet": q, "limits": lim, "errors": errors}
 
 
@@ -206,8 +202,8 @@ def items_state(text):
             else:
                 kind = "blocked" if re.match(r"BLOCKED(?!\w)", rest) else "open"
             items.append((kind, l))
-        elif NUMBERED.match(l):
-            numbered_nobox += 1
+        elif NUMBERED.match(l) or BRACKET.match(l):
+            numbered_nobox += 1  # numbered without a checkbox, or a malformed checkbox: unrecognised
     first_open = next((l for k, l in items if k == "open"), None)
     return {"items": items, "first_open": first_open, "unclosed_fence": unclosed, "numbered_nobox": numbered_nobox}
 
@@ -605,9 +601,14 @@ class NightshiftTests(unittest.TestCase):
         self.assertIsNone(cfg["limits"])
         self.assertTrue(cfg["errors"])
         hand = "# Q\nSTATUS: ACTIVE\nsome words\n## Gate\nLIMITS: 5h=50 week=60\n## Items\n1. [ ] a\n"
-        cfg = config_scan(hand)
-        self.assertEqual(cfg["limits"].strip(), "5h=50 week=60")
-        self.assertEqual(cfg["errors"], [])
+        cfg = config_scan(hand)  # no fallback: LIMITS outside the header is never used and is a CONFIG-ERROR
+        self.assertIsNone(cfg["limits"])
+        self.assertTrue(cfg["errors"])
+        no_heading = "# Q\nSTATUS: ACTIVE\n1. [ ] a\nLIMITS: 5h=90 week=90\n"
+        cfg = config_scan(no_heading)
+        self.assertIsNone(cfg["limits"])
+        self.assertTrue(cfg["errors"])
+        self.assertEqual(config_scan("# Q\nSTATUS: ACTIVE\nLIMITS: 5h=50 week=60\n## Items\n1. [ ] a\n")["limits"].strip(), "5h=50 week=60")
         # a normal template queue is clean
         self.assertEqual(config_scan(self.q())["errors"], [])
         self.assertEqual(config_scan(self.q())["limits"], " 5h=60 week=75")
@@ -632,6 +633,8 @@ class NightshiftTests(unittest.TestCase):
         ok = self.q(items="1. [ ] explain QUIET_WINDOWS: in the docs\n- [ ] quiet windows: note") + "- 2026-11-17 UTC QUIET_WINDOWS: x\n"
         self.assertEqual(config_scan(ok)["errors"], [])
         r = read("skills/run/SKILL.md")
+        self.assertIn("There is no fallback", r)
+        self.assertNotIn("allowed fallback", r)
         for needle in ("Misplaced or misspelled key", "fullwidth colon", "before the first `## ` heading", "never more than the first 15 lines"):
             self.assertIn(needle, r)
 
@@ -678,6 +681,17 @@ class NightshiftTests(unittest.TestCase):
         self.assertNotIn("identical to 0.1.5", c)
         for needle in ("differs from 0.1.5", "CONFIG-ERROR", "Known", "needle-checked", "R4-L4"):
             self.assertIn(needle, c)
+
+    def test_review_fixes_malformed_checkbox_and_misc(self):
+        done = "1. [x] DONE a\n"
+        for bad in ("- [] open", "- [  ] open", "- [ x] DONE", "2. [] x", "* [x]DONEx", "- [link](u) note"):
+            self.assertIsNone(auto_done(self.q(items=done + bad)), bad)
+        self.assertIsNone(items_state(self.q(items="- [] open"))["first_open"])
+        r = read("skills/run/SKILL.md")
+        for needle in ("(`[]`, `[  ]`, `[ x]`)", "if it already holds the lock, it removes the lock first", "If an open item remains, 7b does nothing and logs nothing",
+                       "The one exception is a quiet-window stop"):
+            self.assertIn(needle, r)
+        self.assertLess(r.index("unclosed fence, an unrecognised line"), r.index("8. Operator routine"))
 
 
 if __name__ == "__main__":
