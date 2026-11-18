@@ -47,10 +47,12 @@ class Base(unittest.TestCase):
 
     def run_q(self, *args, **kw):
         env = dict(os.environ)
+        for k in ("PYTHONUTF8", "PYTHONIOENCODING"):
+            env.pop(k, None) if kw.get("plain") else None
         env.pop("NIGHTSHIFT_TEST_CLOCK", None)
         if kw.get("clock", True):
             env["NIGHTSHIFT_TEST_CLOCK"] = "1"
-        argv = [sys.executable, "-X", "utf8", SCRIPT] + list(args)
+        argv = [sys.executable] + ([] if kw.get("plain") else ["-X", "utf8"]) + [SCRIPT] + list(args)
         r = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=60)
         return r.returncode, r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace")
 
@@ -238,18 +240,43 @@ class TestLog(Base):
 
     def test_config_error_and_usage_stop_dedupe(self):
         self.put(Q())
-        for kind, text, marker in (("config-error", "QUIET_WINDOWS is malformed (x)", "CONFIG-ERROR: "), ("usage-stop", "5h=70%", "USAGE STOP: ")):
-            self.assertEqual(self.cmd("log", "--kind", kind, "--", text)[0], 0)
+        self.put(Q(q="bogus"))
+        for kind, text, marker in (("config-error", None, "CONFIG-ERROR: "), ("usage-stop", "5h=70%", "USAGE STOP: ")):
+            extra = ("--", text) if text else ()
+            self.assertEqual(self.cmd("log", "--kind", kind, *extra)[0], 0)
             n = self.get().decode().count(marker)
-            rc, out, _ = self.cmd("log", "--kind", kind, "--", text)
+            rc, out, _ = self.cmd("log", "--kind", kind, *extra)
             self.assertEqual(rc, 0)
             self.assertIn("unchanged", out)
             self.assertEqual(self.get().decode().count(marker), n)
         self.assertEqual(self.cmd("log", "--kind", "result", "--", "something else")[0], 0)
-        self.assertEqual(self.cmd("log", "--kind", "config-error", "--", "QUIET_WINDOWS is malformed (x)")[0], 0)
+        self.assertEqual(self.cmd("log", "--kind", "config-error")[0], 0)
         self.assertEqual(self.get().decode().count("CONFIG-ERROR: "), 2)  # a different line in between: written again
-        self.assertEqual(self.cmd("log", "--kind", "config-error", "--", "another reason")[0], 0)
-        self.assertEqual(self.get().decode().count("CONFIG-ERROR: "), 3)
+        self.put(self.get().decode().replace("QUIET_WINDOWS: bogus", "QUIET_WINDOWS: also bogus"))
+        self.assertEqual(self.cmd("log", "--kind", "config-error")[0], 0)
+        self.assertEqual(self.get().decode().count("CONFIG-ERROR: "), 3)  # another reason: written
+        self.assertEqual(self.cmd("log", "--kind", "config-error", "--", "caller supplied text")[0], 4)
+        self.put(Q())
+        rc, out, _ = self.cmd("log", "--kind", "config-error")
+        self.assertEqual(rc, 0)
+        self.assertIn("nothing logged", out)
+        self.assertNotIn("CONFIG-ERROR", self.get().decode())
+
+    def test_config_error_reason_never_comes_from_the_command_line(self):
+        evil = "limits : `touch x` $(id)"
+        self.put(Q().replace("\n\n## Items", "\n" + evil + "\n\n## Items", 1))
+        self.assertEqual(self.cmd("log", "--kind", "config-error")[0], 0)
+        self.assertIn("LIMITS is misplaced or misspelled: limits : `touch x` $(id)", self.get().decode())
+
+    def test_works_without_the_utf8_flag(self):
+        self.put(Q(items="1. [ ] \u0645\u0647\u0645\u0629"))
+        rc, out, _ = self.run_q("log", "--root", self.root, "--", "\u062a\u0645", plain=True)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("UTC \u062a\u0645\n", self.get().decode("utf-8"))
+        rc, out, _ = self.run_q("check", "--root", self.root, plain=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("\\u0645", out)  # JSON is ASCII-escaped, the console code page cannot break it
+        self.assertEqual(json.loads(out)["next_item"]["index"], 1)
 
     def test_option_injection_and_strict_parsing(self):
         self.put(Q())
@@ -356,6 +383,19 @@ class TestEdits(Base):
             else:
                 self.assertEqual(self.get().decode(), text, name)
             self.assertNotIn("STATUS: DONE", self.get().decode(), name)
+
+    def test_done_with_open_item_logs_nothing_even_with_other_problems(self):
+        for items in ("1. [ ] a\n2. note", "1. [ ] a\n```\nx", "1. [ ] a\n2. [x] nope"):
+            self.put(Q(items=items))
+            before = self.get()
+            self.assertEqual(self.cmd("done")[0], 2, items)
+            self.assertEqual(self.get(), before, items)
+
+    def test_block_keeps_long_item_text_verbatim(self):
+        long_item = "x" * 400
+        self.put(Q(items="1. [ ] " + long_item))
+        self.assertEqual(self.cmd("block", "1", "--", "why")[0], 0)
+        self.assertIn("| was: " + long_item + "\n", self.get().decode())
 
     def test_done_config_error_not_repeated(self):
         self.put(Q(items="text"))

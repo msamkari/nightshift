@@ -608,8 +608,15 @@ def is_duplicate(kind, line, lines_in_log):
     return False
 
 
-def append_log(p, kind, text, utc):
+def append_log(p, kind, text, utc, local=None):
+    """Append one log line. For kind config-error with no text the reason is the script's own evaluation
+    (so no queue text ever travels through the model's command line)."""
     data, snap = read_queue(p)
+    if kind == "config-error" and text is None:
+        res = evaluate(data, utc, local or utc)
+        if not res["config_error"]:
+            return "no config error present, nothing logged"
+        text = res["config_error"]
     line = make_log_line(kind, text, utc)
     parts = split_lines(decode(data))
     if is_duplicate(kind, line, log_lines(parts)):
@@ -623,10 +630,13 @@ def cmd_log(p, opts, pos):
     kind = opts.get("kind", "result")
     if kind not in ("running", "usage-stop", "config-error", "result", "note"):
         raise UsageError("unknown --kind")
-    if len(pos) != 1:
+    if kind == "config-error":
+        if pos:
+            raise UsageError("log --kind config-error takes no text: it logs the script's own reason")
+    elif len(pos) != 1:
         raise UsageError("log takes exactly one text argument (put it after --)")
-    utc, _ = clocks(opts)
-    emit("OK: " + append_log(p, kind, pos[0], utc))
+    utc, local = clocks(opts)
+    emit("OK: " + append_log(p, kind, pos[0] if pos else None, utc, local))
     return EXIT_OK
 
 
@@ -653,7 +663,7 @@ def edit_item(p, n_text, mode, reason, utc):
         sep = "" if (rest == "" or rest[0] in " \t") else " "
         new_body = prefix + "[x] DONE" + sep + rest
     else:
-        orig = san(rest.strip(), 150)
+        orig = rest.strip()
         new_body = prefix + "[ ] BLOCKED: " + reason + (" | was: " + orig if orig else "")
     raw[item["idx"]] = new_body + ("\r" if cr else "")
     new = "\n".join(raw).encode("utf-8", "surrogateescape")
@@ -693,6 +703,8 @@ def cmd_done(p, opts, pos):
         return EXIT_OK
     st = items_state(text)
     items = st["items"]
+    if any(it["kind"] == "open" for it in items):
+        raise Refused("REFUSED: an open item remains, auto-DONE does nothing and logs nothing")
     reason = None
     if st["unclosed_fence"]:
         reason = "unclosed code fence"
@@ -702,8 +714,6 @@ def cmd_done(p, opts, pos):
             reason = "item line not recognised: %s" % san(parts[bad][:40])
         elif not items:
             reason = "no items found under ## Items"
-    if reason is None and any(it["kind"] == "open" for it in items):
-        raise Refused("REFUSED: an open item remains, auto-DONE does nothing")
     if reason is None and (len(parts) < 2 or parts[1] != "STATUS: ACTIVE"):
         reason = "queue is finished but line 2 could not be set safely"
     if reason is not None:
