@@ -252,7 +252,7 @@ def write_queue(p, new, snap):
 def touch_lock(p):
     """Heartbeat: every queue write refreshes the lock time, so a long run does not look stale."""
     try:
-        if os.path.lexists(p.lock) and not is_link(p.lock) and os.path.isdir(p.lock):
+        if isinstance(lock_state(p.lock), tuple):  # an empty real folder with a sane date; never a future-dated or odd lock
             os.utime(p.lock, None)
     except OSError:
         pass

@@ -244,6 +244,17 @@ class TestM4Lock(tq.Base):
         self.assertTrue(os.path.isdir(self.lock))
         self.assertEqual([n for n in os.listdir(os.path.join(self.tmp, "Jobs")) if ".stale." in n], [])
 
+    def test_future_dated_lock_is_never_refreshed_or_taken_over(self):
+        self.put(Q())
+        os.mkdir(self.lock)
+        future = time.time() + 3600
+        os.utime(self.lock, (future, future))
+        self.assertEqual(self.cmd("lock")[0], 3)  # LOCK-REFUSED, and the STOPPED note write must not touch the lock time
+        self.assertGreater(os.stat(self.lock).st_mtime, time.time() + 1800)
+        rc, out, _ = self.cmd("lock")
+        self.assertEqual(rc, 3)
+        self.assertIn("LOCK-REFUSED", out)
+
     def test_run_skill_unlocks_before_the_operator_routine(self):
         skill = (ROOT / "skills" / "run" / "SKILL.md").read_text(encoding="utf-8")
         steps = skill.split("## Steps")[1].split("## Fallback")[0]

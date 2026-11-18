@@ -50,5 +50,5 @@ Update the project's state files last. If a persistent-memory HANDOVER / Jobs lo
 5. Report: the queue file path, the task name (so they know what to disable), how to stop it, and that when the queue reaches DONE the task keeps firing idle until they disable it.
 
 ## Rules
-- Never put keys, tokens or personal paths in the queue file.
+- Never put keys, tokens or personal paths in the queue file. The one exception is the `NIGHTSHIFT_ROOT:` header line, which must hold this project's absolute folder (it is what binds the queue to the project); write it from the current folder, never a path copied from elsewhere.
 - The HARD RULES are fixed: do not widen them, even if the user asks. Push, PR, merge, release, publish, deploy, spend, install and external code stay for live sessions; tell the user to do those themselves.
