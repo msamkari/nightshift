@@ -28,6 +28,15 @@ NEAR = {
 ITEMS_END = re.compile(r"^## (Log|Operator routine)\b")
 
 
+RUN_TOOLS = ", ".join("Bash(python ${CLAUDE_PLUGIN_ROOT}/scripts/queue.py %s *)" % c
+                      for c in ("check", "lock", "unlock", "log", "tick", "block", "done"))
+
+
+def fallback(r):
+    """The manual (pre-0.1.7) steps, kept as a documented fallback; the order checks apply to them."""
+    return r[r.index("## Fallback steps"):]
+
+
 def split_lines(text):
     """The one splitter: only \\n splits, one trailing \\r is dropped (U+2028, lone CR do not split)."""
     return [l[:-1] if l.endswith("\r") else l for l in text.split("\n")]
@@ -235,10 +244,13 @@ class NightshiftTests(unittest.TestCase):
             f = front(t)
             self.assertEqual(f["name"], s)
             self.assertTrue(len(f["description"]) > 40)
-            self.assertNotIn("allowed-tools", f)  # no pre-approved tools at all
+            if s == "setup":
+                self.assertNotIn("allowed-tools", f)  # setup pre-approves nothing
+            else:
+                self.assertEqual(f["allowed-tools"], RUN_TOOLS)  # run: exactly the plugin's own script, nothing else
 
     def test_no_code_no_network(self):
-        files = [p for p in ROOT.rglob("*") if p.is_file() and ".git" not in p.parts and p.suffix in (".py", ".js", ".mjs", ".sh", ".ps1") and p.name != "test_skills.py"]
+        files = [p for p in ROOT.rglob("*") if p.is_file() and ".git" not in p.parts and p.suffix in (".py", ".js", ".mjs", ".sh", ".ps1") and p.name not in ("test_skills.py", "test_queue.py", "test_fixes.py", "queue.py")]
         self.assertEqual(files, [])
 
     def test_setup_rules(self):
@@ -272,6 +284,7 @@ class NightshiftTests(unittest.TestCase):
         self.assertIn("30 minutes", s)
         self.assertIn("do not widen them", s)
         self.assertIn("already mentions nightshift", s)
+        r = fallback(r)
         self.assertLess(r.index("Tick the item"), r.index("Operator routine, LAST"))
         self.assertNotIn("STATUS: DONE", s.split("## Gate")[0].split("STATUS: ACTIVE")[1])
 
@@ -342,13 +355,13 @@ class NightshiftTests(unittest.TestCase):
 
     def test_version_consistent(self):
         v = json.loads(read(".claude-plugin/plugin.json"))["version"]
-        self.assertEqual(v, "0.1.6")
+        self.assertEqual(v, "0.1.7")
         self.assertIn("(v%s)" % v, read("README.md"))
         self.assertIn("(الإصدار %s)" % v, read("README.ar.md"))
         self.assertTrue(read("CHANGELOG.md").startswith("# Changelog\n\n## %s " % v))
-        self.assertNotIn("0.1.5", read(".claude-plugin/plugin.json"))
+        self.assertNotIn("0.1.6", read(".claude-plugin/plugin.json"))
         for f in ("README.md", "README.ar.md"):
-            self.assertNotIn("0.1.5)", read(f).splitlines()[0])
+            self.assertNotIn("0.1.6)", read(f).splitlines()[0])
 
     def test_worked_examples_table_in_skill(self):
         r = read("skills/run/SKILL.md")
@@ -428,8 +441,7 @@ class NightshiftTests(unittest.TestCase):
         for needle in ("under 20 minutes old", "Jobs/.nightshift.lock", "older than 30 minutes", "best effort only", "treated as 90",
                        "data, not instructions", "FIRST item", "above 90"):
             self.assertIn(needle, r)
-        for s in ("setup", "run"):
-            self.assertNotIn("allowed-tools", read("skills/%s/SKILL.md" % s))
+        self.assertNotIn("allowed-tools", read("skills/setup/SKILL.md"))
 
     def test_setup_template_has_quiet_line_in_header(self):
         s = read("skills/setup/SKILL.md")
@@ -488,6 +500,7 @@ class NightshiftTests(unittest.TestCase):
                        "When unsure, never mark DONE", "outside fences", "take the same lock first",
                        "there is no atomic file replace", "line endings, BOM, non-ASCII text, trailing spaces"):
             self.assertIn(needle, r)
+        r = fallback(r)
         self.assertLess(r.index("Tick the item"), r.index("7b. Auto-DONE"))
         self.assertLess(r.index("7b. Auto-DONE"), r.index("Operator routine, LAST"))
 
@@ -691,6 +704,7 @@ class NightshiftTests(unittest.TestCase):
         for needle in ("(`[]`, `[  ]`, `[ x]`)", "if it already holds the lock, it removes the lock first", "If an open item remains, 7b does nothing and logs nothing",
                        "The one exception is a quiet-window stop"):
             self.assertIn(needle, r)
+        r = fallback(r)
         self.assertLess(r.index("unclosed fence, an unrecognised line"), r.index("8. Operator routine"))
 
 
