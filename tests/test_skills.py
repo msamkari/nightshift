@@ -250,7 +250,7 @@ class NightshiftTests(unittest.TestCase):
                 self.assertEqual(f["allowed-tools"], RUN_TOOLS)  # run: exactly the plugin's own script, nothing else
 
     def test_no_code_no_network(self):
-        files = [p for p in ROOT.rglob("*") if p.is_file() and ".git" not in p.parts and p.suffix in (".py", ".js", ".mjs", ".sh", ".ps1") and p.name not in ("test_skills.py", "test_queue.py", "queue.py")]
+        files = [p for p in ROOT.rglob("*") if p.is_file() and ".git" not in p.parts and p.suffix in (".py", ".js", ".mjs", ".sh", ".ps1") and p.name not in ("test_skills.py", "test_queue.py", "test_fixes.py", "queue.py")]
         self.assertEqual(files, [])
 
     def test_setup_rules(self):

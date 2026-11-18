@@ -37,9 +37,22 @@ class Base(unittest.TestCase):
         self.queue = os.path.join(self.tmp, "Jobs", "resume_queue.md")
         self.lock = os.path.join(self.tmp, "Jobs", ".nightshift.lock")
 
+    legacy = False
+
+    def bound(self, text):
+        """Fixtures are bound to their project folder (NIGHTSHIFT_ROOT header after line 2) unless a test says otherwise."""
+        if self.legacy or "NIGHTSHIFT_ROOT:" in text:
+            return text
+        first = text.find("\n")
+        second = text.find("\n", first + 1) if first >= 0 else -1
+        if second < 0:
+            return text
+        eol = "\r\n" if text[second - 1] == "\r" else "\n"
+        return text[:second + 1] + "NIGHTSHIFT_ROOT: " + self.root + eol + text[second + 1:]
+
     def put(self, text, raw=False):
         with open(self.queue, "wb") as f:
-            f.write(text if raw else text.encode("utf-8"))
+            f.write(text if raw else self.bound(text).encode("utf-8"))
 
     def get(self):
         with open(self.queue, "rb") as f:
@@ -50,8 +63,11 @@ class Base(unittest.TestCase):
         for k in ("PYTHONUTF8", "PYTHONIOENCODING"):
             env.pop(k, None) if kw.get("plain") else None
         env.pop("NIGHTSHIFT_TEST_CLOCK", None)
+        env.pop("NIGHTSHIFT_TEST_CLOCK_VALUE", None)
         if kw.get("clock", True):
             env["NIGHTSHIFT_TEST_CLOCK"] = "1"
+        if kw.get("clock_value") is not None:
+            env["NIGHTSHIFT_TEST_CLOCK_VALUE"] = kw["clock_value"]
         argv = [sys.executable] + ([] if kw.get("plain") else ["-X", "utf8"]) + [SCRIPT] + list(args)
         r = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=60)
         return r.returncode, r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace")
@@ -60,7 +76,7 @@ class Base(unittest.TestCase):
         return self.run_q(name, "--root", self.root, *rest, **kw)
 
     def check(self, now="12:00", utc="2026-11-18 12:00", **kw):
-        rc, out, _ = self.cmd("check", "--now", now, "--utc-now", utc, **kw)
+        rc, out, _ = self.cmd("check", clock_value="%s|%s" % (utc, now), **kw)
         self.assertEqual(rc, 0, out)
         return json.loads(out)
 
@@ -124,9 +140,21 @@ class TestCheckWindows(Base):
         self.put(Q(log="- 2026-11-18 01:00 UTC STATUS: DONE"))
         self.assertFalse(self.check()["status_done"])
 
-    def test_test_clock_rejected_without_env(self):
+    def test_clock_flags_are_gone_from_the_cli(self):
+        self.put(Q(q="00:00-12:00, 12:00-00:00"))
+        for flag, val in (("--now", "12:00"), ("--utc-now", "2001-01-01 00:00")):
+            for clk in (True, False):
+                rc, out, _ = self.cmd("check", flag, val, clock=clk)
+                self.assertEqual(rc, 4, (flag, clk, out))
+        rc, out, _ = self.cmd("log", "--utc-now", "2001-01-01 00:00", "--", "x")
+        self.assertEqual(rc, 4, out)
+
+    def test_clock_value_ignored_without_switch(self):
         self.put(Q())
-        rc, out, _ = self.cmd("check", "--now", "12:00", clock=False)
+        rc, out, _ = self.cmd("log", "--", "real clock", clock=False, clock_value="2001-01-01 00:00|00:00")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn(b"2001-01-01", self.get())  # without the switch the injected value is ignored
+        rc, out, _ = self.cmd("check", clock_value="nonsense")
         self.assertEqual(rc, 4, out)
 
 
@@ -191,7 +219,7 @@ class TestCheckItemsAndLog(Base):
     def test_stable_keys_and_auto_done_ready(self):
         self.put(Q(items="1. [x] DONE a\n2. [ ] BLOCKED: b"))
         res = self.check()
-        self.assertEqual(list(res)[:12], list(nsq.CHECK_KEYS))
+        self.assertEqual(list(res)[:len(nsq.CHECK_KEYS)], list(nsq.CHECK_KEYS))
         self.assertTrue(res["auto_done_ready"])
         self.assertIsNone(res["next_item"])
 
@@ -381,7 +409,7 @@ class TestEdits(Base):
                 self.assertIn(msg, out, name)
                 self.assertRegex(self.get().decode(), r"CONFIG-ERROR: .*" + re.escape(msg), name)
             else:
-                self.assertEqual(self.get().decode(), text, name)
+                self.assertEqual(self.get().decode(), self.bound(text), name)
             self.assertNotIn("STATUS: DONE", self.get().decode(), name)
 
     def test_done_with_open_item_logs_nothing_even_with_other_problems(self):
@@ -503,11 +531,11 @@ class TestLock(Base):
 
     def test_quiet_window_after_lock_removes_lock(self):
         self.put(Q(q="08:30-09:20"))
-        rc, out, _ = self.cmd("lock", "--now", "09:00")
+        rc, out, _ = self.cmd("lock", clock_value="|09:00")
         self.assertEqual(rc, 2, out)
         self.assertFalse(os.path.exists(self.lock))
-        self.assertEqual(self.get().decode(), Q(q="08:30-09:20"))
-        self.assertEqual(self.cmd("lock", "--now", "09:20")[0], 0)
+        self.assertEqual(self.get().decode(), self.bound(Q(q="08:30-09:20")))
+        self.assertEqual(self.cmd("lock", clock_value="|09:20")[0], 0)
 
     def test_lock_with_malformed_config_fails_closed(self):
         self.put(Q(q="bogus"))
@@ -652,8 +680,10 @@ class TestSourceHygiene(unittest.TestCase):
     def test_no_network_shell_or_environment_dump(self):
         for needle in ("socket", "urllib", "http", "subprocess", "os.system", "os.popen", "shell=True", "os.environ.items", "dict(os.environ", "os.environ)", "getenv("):
             self.assertNotIn(needle, self.src, needle)
-        self.assertEqual(len(re.findall(r"os\.environ", self.src)), 1)  # the single test-clock switch
+        self.assertEqual(len(re.findall(r"os\.environ", self.src)), 2)  # the test-clock switch and its value
         self.assertIn('os.environ.get("NIGHTSHIFT_TEST_CLOCK")', self.src)
+        self.assertIn('os.environ.get("NIGHTSHIFT_TEST_CLOCK_VALUE")', self.src)
+        self.assertNotIn('"utc-now"', self.src)
 
     def test_no_personal_paths(self):
         self.assertNotRegex(self.src, r"C:[\\/]+Users|@[a-z0-9-]+\.[a-z]{2,}")

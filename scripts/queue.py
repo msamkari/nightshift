@@ -8,16 +8,18 @@ Commands (all take --root):
   lock                  atomic mkdir of Jobs/.nightshift.lock (stale rules, quiet-window re-check)
   unlock                remove the lock only if it is an empty real folder
   log [--kind K] -- T   append one log line; K = running|usage-stop|config-error|result|note (default result)
-  tick N                item N: [ ] -> [x] DONE (only if currently open)
-  block N -- REASON     item N: mark BLOCKED with the reason (only if currently open)
+  tick N [--id H]       item N: [ ] -> [x] DONE (only if currently open; refused if --id H no longer matches)
+  block N [--id H] -- REASON   item N: mark BLOCKED with the reason (same rules)
   done                  auto-DONE (line 2 ACTIVE -> DONE) only when every item is DONE or BLOCKED
 
 Exit codes: 0 ok, 2 refused by a rule (the message says which), 3 lock problem, 4 usage error.
 Only <root>/Jobs/resume_queue.md and <root>/Jobs/.nightshift.lock are touched (plus a temp file in
 <root>/Jobs/ that is renamed over the queue). Text arguments are DATA: control characters are stripped,
-the length is capped, nothing is interpreted. Test clock options (--now, --utc-now) are rejected unless
-the environment variable NIGHTSHIFT_TEST_CLOCK is exactly 1.
+the length is capped, nothing is interpreted. There is no clock option on the command line: tests inject
+the time through the environment variable NIGHTSHIFT_TEST_CLOCK_VALUE, read only when NIGHTSHIFT_TEST_CLOCK is 1.
+The queue header line `NIGHTSHIFT_ROOT: <project folder>` binds a queue to its project (see check_binding).
 """
+import hashlib
 import json
 import os
 import re
@@ -36,7 +38,7 @@ RECENT_LOG_MINUTES = 20
 LOCK_NAME = ".nightshift.lock"
 QUEUE_NAME = "resume_queue.md"
 CHECK_KEYS = ("ok", "stop", "reason", "config_error", "status_done", "in_quiet_window", "limits",
-              "last_log_age_minutes", "next_item", "items", "unclosed_fence", "auto_done_ready")
+              "last_log_age_minutes", "next_item", "items", "unclosed_fence", "auto_done_ready", "root_bound", "note")
 
 
 class Refused(Exception):
@@ -188,6 +190,8 @@ def read_queue(p):
                 raise Refused("REFUSED: the queue is larger than 1 MB")
     finally:
         os.close(fd)
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff") or b"\x00" in data:
+        raise Refused("REFUSED: the queue is not UTF-8 text (UTF-16 or binary); nothing is read or written, save it as UTF-8")
     return data, (st.st_size, st.st_mtime_ns)
 
 
@@ -235,12 +239,23 @@ def write_queue(p, new, snap):
             except OSError:
                 pass
     if done:
+        touch_lock(p)
         return "replace"
     with open(p.queue, "r+b") as f:  # in-place byte-level fallback
         f.seek(0)
         f.write(new)
         f.truncate()
+    touch_lock(p)
     return "in-place"
+
+
+def touch_lock(p):
+    """Heartbeat: every queue write refreshes the lock time, so a long run does not look stale."""
+    try:
+        if os.path.lexists(p.lock) and not is_link(p.lock) and os.path.isdir(p.lock):
+            os.utime(p.lock, None)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------- parsing (the written definitions)
@@ -366,30 +381,43 @@ def in_quiet(wins, hhmm):
     return False
 
 
-def parse_limits(text):
+def limits_check(text):
+    """(limits dict, error or None). A LIMITS line that is present but malformed is an error, never the defaults."""
     five, week = 60, 75
     cfg = config_scan(text, True)
     val = cfg["limits"]
-    if val and not cfg["errors"]:
-        m5 = re.search(r"(?<![\w])5h=([0-9]{1,3})(?![0-9])", val)
-        mw = re.search(r"(?<![\w])week=([0-9]{1,3})(?![0-9])", val)
-        if m5:
-            five = int(m5.group(1))
-        if mw:
-            week = int(mw.group(1))
-    return {"five_hour": min(five, 90), "weekly": min(week, 90)}
+    err = None
+    if val is not None and not cfg["errors"]:
+        seen = {}
+        for tok in val.split():
+            m = re.fullmatch(r"(5h|week)=([0-9]{1,3})", tok)
+            if not m or m.group(1) in seen:
+                seen = None
+                break
+            seen[m.group(1)] = int(m.group(2))
+        if not seen:
+            err = "LIMITS is malformed (%s)" % san(val.strip(), 80)
+        else:
+            five, week = seen.get("5h", five), seen.get("week", week)
+    return {"five_hour": min(five, 90), "weekly": min(week, 90)}, err
+
+
+def parse_limits(text):
+    return limits_check(text)[0]
 
 
 def items_state(text):
     """The single Item definition. items = list of dicts(kind, idx (line index), n (1-based))."""
     lines = split_lines(text)
     fm, unclosed = fence_map(lines)
-    in_items, items, extra = False, [], []
+    in_items, seen_items, items, extra = False, False, [], []
     for i, l in enumerate(lines):
         if fm[i]:
             continue
         if l.rstrip(" \t") == "## Items":
-            in_items = True
+            if not seen_items:  # only the FIRST heading opens the section; a later one is plain text
+                in_items = True
+                seen_items = True
             continue
         if ITEMS_END.match(l):
             in_items = False
@@ -441,23 +469,25 @@ def log_lines(lines):
 
 
 # ---------------------------------------------------------------- clock
-def clocks(opts):
-    """Returns (utc_now, local_now) naive datetimes. Injection only with NIGHTSHIFT_TEST_CLOCK=1."""
-    inj_now, inj_utc = opts.get("now"), opts.get("utc-now")
-    if (inj_now or inj_utc) and os.environ.get("NIGHTSHIFT_TEST_CLOCK") != "1":
-        raise UsageError("--now and --utc-now are only accepted in test mode")
+def clocks():
+    """Returns (utc_now, local_now) naive datetimes. The real clock, unless the process environment has
+    NIGHTSHIFT_TEST_CLOCK=1 and NIGHTSHIFT_TEST_CLOCK_VALUE='[YYYY-MM-DD HH:MM][|HH:MM]' (UTC, then local time of day)."""
     utc = datetime.now(timezone.utc).replace(tzinfo=None, second=0, microsecond=0)
     local = datetime.now().replace(second=0, microsecond=0)
+    if os.environ.get("NIGHTSHIFT_TEST_CLOCK") != "1":
+        return utc, local
+    value = os.environ.get("NIGHTSHIFT_TEST_CLOCK_VALUE") or ""
+    inj_utc, _, inj_now = value.partition("|")
     if inj_utc:
         try:
             utc = datetime.strptime(inj_utc, "%Y-%m-%d %H:%M")
         except ValueError:
-            raise UsageError("--utc-now must be 'YYYY-MM-DD HH:MM'")
+            raise UsageError("NIGHTSHIFT_TEST_CLOCK_VALUE must be 'YYYY-MM-DD HH:MM[|HH:MM]'")
         local = utc
     if inj_now:
         m = re.fullmatch(r"([0-9]{2}):([0-9]{2})", inj_now)
         if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
-            raise UsageError("--now must be HH:MM")
+            raise UsageError("NIGHTSHIFT_TEST_CLOCK_VALUE local time must be HH:MM")
         local = local.replace(hour=int(m.group(1)), minute=int(m.group(2)))
     return utc, local
 
@@ -487,6 +517,50 @@ def last_log_age(lines, utc, local):
     return ("recent" if (now - then).total_seconds() < RECENT_LOG_MINUTES * 60 else "ok"), minutes, None
 
 
+def item_id(line):
+    """First 12 hex characters of sha256 of the item line (without CR): lets tick/block detect a moved or edited item."""
+    return hashlib.sha256(line.rstrip("\r").encode("utf-8", "surrogateescape")).hexdigest()[:12]
+
+
+ROOT_KEY = "NIGHTSHIFT_ROOT:"
+LEGACY_NOTE = ("queue has no NIGHTSHIFT_ROOT header (legacy queue): it is not bound to this project folder; "
+               "add the header line 'NIGHTSHIFT_ROOT: <project folder>' under STATUS (setup writes it)")
+
+
+def header_root(data):
+    """Value of the NIGHTSHIFT_ROOT header line: None (absent), the raw value, or '' when it appears twice."""
+    lines = split_lines(decode(data))
+    if lines and lines[0].startswith("\ufeff"):
+        lines[0] = lines[0][1:]
+    vals = [l[len(ROOT_KEY):].strip(" \t") for l in lines[:header_end(lines)] if l.startswith(ROOT_KEY)]
+    if not vals:
+        return None
+    return vals[0] if len(vals) == 1 else ""
+
+
+def same_folder(a, b):
+    try:
+        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+    except (OSError, ValueError):
+        return False
+
+
+def check_binding(p):
+    """M1: a queue that names its project root must be used with exactly that --root. Returns the legacy note
+    when the queue has no header (it still works, with the note), None when bound. Raises Refused on a mismatch.
+    No queue file yet: nothing to bind, the command itself reports that."""
+    if not os.path.lexists(p.queue):
+        return None
+    data, _ = read_queue(p)
+    val = header_root(data)
+    if val is None:
+        return LEGACY_NOTE
+    if val == "" or not same_folder(val, p.root):
+        raise Refused("REFUSED: the queue header NIGHTSHIFT_ROOT does not match --root (wrong project folder, "
+                      "or the project was moved: fix the header line by hand)")
+    return None
+
+
 def evaluate(data, utc, local):
     text = decode(data)
     lines = split_lines(text)
@@ -503,9 +577,11 @@ def evaluate(data, utc, local):
         "in_quiet_window": False, "limits": parse_limits(text), "last_log_age_minutes": None,
         "next_item": None, "items": counts, "unclosed_fence": st["unclosed_fence"],
         "auto_done_ready": False,
+        "root_bound": None, "note": None,
     }
     if first_open is not None:
-        res["next_item"] = {"index": first_open["n"], "text": san(lines[first_open["idx"]].strip())}
+        res["next_item"] = {"index": first_open["n"], "id": item_id(lines[first_open["idx"]]),
+                            "text": san(lines[first_open["idx"]].strip())}
     res["auto_done_ready"] = (
         line2 == "STATUS: ACTIVE" and bool(st["items"]) and counts["open"] == 0 and counts["unrecognised"] == 0
         and not st["unclosed_fence"])
@@ -525,6 +601,13 @@ def evaluate(data, utc, local):
     if errs:
         res.update(stop=True, reason="config-error", config_error=errs[0])
         return res
+    if log_section(lines)[0] is None:
+        res.update(stop=True, reason="config-error", config_error="no ## Log section")
+        return res
+    lim, lim_err = limits_check(text)
+    if lim_err:
+        res.update(stop=True, reason="config-error", config_error=lim_err)
+        return res
     state, minutes, why = last_log_age(lines, utc, local)
     res["last_log_age_minutes"] = minutes
     if state == "bad":
@@ -541,7 +624,7 @@ def evaluate(data, utc, local):
 
 
 def cmd_check(p, opts, pos):
-    utc, local = clocks(opts)
+    utc, local = clocks()
     try:
         data, _ = read_queue(p)
     except Refused as e:
@@ -549,7 +632,11 @@ def cmd_check(p, opts, pos):
         out.update(ok=False, stop=True, reason=san(e.msg))
         emit_json(out)
         return e.code
-    emit_json(evaluate(data, utc, local))
+    res = evaluate(data, utc, local)
+    res["root_bound"] = header_root(data) is not None
+    if not res["root_bound"]:
+        res["note"] = LEGACY_NOTE
+    emit_json(res)
     return EXIT_OK
 
 
@@ -578,7 +665,14 @@ def insert_log(text, line):
     lines = text.split("\n")
     parts = split_lines(text)
     s, e = log_section(parts)
-    if s is None or e == len(parts):
+    if s is None:  # no Log section at all: add the heading once, then the line
+        eol = "\r" if len(lines) > 1 and lines[-2].endswith("\r") else ""
+        body = lines[:-1] if lines[-1] == "" else lines[:]
+        if lines[-1] != "" and eol:
+            body[-1] = body[-1] + "\r"
+        body += [eol, "## Log" + eol, line + eol, ""]
+        return "\n".join(body)
+    if e == len(parts):
         if lines[-1] == "":
             crlf = len(lines) > 1 and lines[-2].endswith("\r")
             lines.insert(len(lines) - 1, line + ("\r" if crlf else ""))
@@ -596,13 +690,16 @@ def insert_log(text, line):
     return "\n".join(lines)
 
 
+_STAMPED = re.compile(r"^- (?:[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}(?: UTC)?|unknown-time) (CONFIG-ERROR|STOPPED): (.*)$")
+
+
 def is_duplicate(kind, line, lines_in_log):
     if not lines_in_log:
         return False
     last = lines_in_log[-1]
     if kind in ("config-error", "note"):
-        key = line[line.index("UTC ") + 4:]  # "CONFIG-ERROR: reason" or "STOPPED: reason"
-        return last.endswith(key)
+        a, b = _STAMPED.match(last), _STAMPED.match(line)
+        return bool(a and b and a.groups() == b.groups())  # same prefix word AND same reason
     if kind == "usage-stop":
         return bool(re.match(r"^- \S+ \S+ UTC USAGE STOP:", last))
     return False
@@ -635,15 +732,17 @@ def cmd_log(p, opts, pos):
             raise UsageError("log --kind config-error takes no text: it logs the script's own reason")
     elif len(pos) != 1:
         raise UsageError("log takes exactly one text argument (put it after --)")
-    utc, local = clocks(opts)
+    utc, local = clocks()
     emit("OK: " + append_log(p, kind, pos[0] if pos else None, utc, local))
     return EXIT_OK
 
 
 # ---------------------------------------------------------------- tick / block / done
-def edit_item(p, n_text, mode, reason, utc):
+def edit_item(p, n_text, mode, reason, utc, want_id=None):
     if not re.fullmatch(r"[0-9]{1,6}", n_text or ""):
         raise UsageError("the item number must be a positive integer")
+    if want_id is not None and not re.fullmatch(r"[0-9a-f]{12}", want_id):
+        raise UsageError("--id must be the 12 hex characters from check (next_item.id)")
     n = int(n_text)
     data, snap = read_queue(p)
     text = decode(data)
@@ -653,6 +752,9 @@ def edit_item(p, n_text, mode, reason, utc):
         raise Refused("REFUSED: there is no item %d" % n)
     if item["kind"] != "open":
         raise Refused("REFUSED: item %d is not open (it is %s)" % (n, item["kind"]))
+    if want_id is not None and item_id(st["lines"][item["idx"]]) != want_id:
+        raise Refused("REFUSED: item %d changed since check (the queue was edited during the run); nothing written, "
+                      "run check again" % n)
     raw = text.split("\n")
     piece = raw[item["idx"]]
     cr = piece.endswith("\r")
@@ -671,11 +773,17 @@ def edit_item(p, n_text, mode, reason, utc):
     return "item %d marked %s" % (n, "DONE" if mode == "tick" else "BLOCKED")
 
 
+def id_note(opts):
+    if "id" not in opts:
+        sys.stderr.write("NOTE: no --id given, the item was not verified against check (pass next_item.id)\n")
+
+
 def cmd_tick(p, opts, pos):
     if len(pos) != 1:
         raise UsageError("tick takes exactly one item number")
-    utc, _ = clocks(opts)
-    emit("OK: " + edit_item(p, pos[0], "tick", None, utc))
+    utc, _ = clocks()
+    emit("OK: " + edit_item(p, pos[0], "tick", None, utc, opts.get("id")))
+    id_note(opts)
     return EXIT_OK
 
 
@@ -685,15 +793,16 @@ def cmd_block(p, opts, pos):
     reason = san(" ".join(pos[1].split()), 200)
     if not reason:
         raise UsageError("block needs a non-empty reason")
-    utc, _ = clocks(opts)
-    emit("OK: " + edit_item(p, pos[0], "block", reason, utc))
+    utc, _ = clocks()
+    emit("OK: " + edit_item(p, pos[0], "block", reason, utc, opts.get("id")))
+    id_note(opts)
     return EXIT_OK
 
 
 def cmd_done(p, opts, pos):
     if pos:
         raise UsageError("done takes no arguments")
-    utc, _ = clocks(opts)
+    utc, _ = clocks()
     data, snap = read_queue(p)
     text = decode(data)
     lines = text.split("\n")
@@ -762,7 +871,7 @@ def lock_state(path):
 
 
 def quiet_inside_now(p, opts):
-    utc, local = clocks(opts)
+    utc, local = clocks()
     try:
         data, _ = read_queue(p)
     except Refused as e:
@@ -776,10 +885,31 @@ def quiet_inside_now(p, opts):
     return False, ""
 
 
+def steal_stale(p):
+    """Take over a stale lock by renaming it away (only one process can win the rename), then check that what
+    was renamed really was stale; if it was fresh (someone re-locked in between) put it back."""
+    tomb = p.lock + ".stale.%s" % os.urandom(4).hex()
+    try:
+        os.rename(p.lock, tomb)
+    except OSError:
+        return
+    st = lock_state(tomb)
+    if st == "bad" or (st != "none" and st[1] < STALE_LOCK_MINUTES):
+        try:
+            os.rename(tomb, p.lock)  # fails if somebody locked again: then the fresh lock is theirs
+        except OSError:
+            pass
+    if os.path.lexists(tomb) and not is_link(tomb):
+        try:
+            os.rmdir(tomb)
+        except OSError:
+            pass
+
+
 def cmd_lock(p, opts, pos):
     if pos:
         raise UsageError("lock takes no arguments")
-    utc, _ = clocks(opts)
+    utc, _ = clocks()
     for attempt in (1, 2):
         try:
             os.mkdir(p.lock)
@@ -798,15 +928,7 @@ def cmd_lock(p, opts, pos):
             if state[1] < STALE_LOCK_MINUTES or attempt == 2:
                 emit("LOCK-HELD: another run holds Jobs/.nightshift.lock (%d minutes old)" % int(state[1]))
                 return EXIT_LOCK
-            again = lock_state(p.lock)  # re-check right before removing
-            if again == "none" or (again != "bad" and again[1] >= STALE_LOCK_MINUTES):
-                try:
-                    os.rmdir(p.lock)
-                except OSError:
-                    pass
-            else:
-                emit("LOCK-HELD: another run holds Jobs/.nightshift.lock")
-                return EXIT_LOCK
+            steal_stale(p)  # rename-then-remove; the loop then retries mkdir
         except OSError:
             emit("LOCK-REFUSED: the lock folder cannot be created")
             return EXIT_LOCK
@@ -845,13 +967,13 @@ def cmd_unlock(p, opts, pos):
 
 # ---------------------------------------------------------------- strict argument parsing
 COMMANDS = {
-    "check": (cmd_check, ("root", "now", "utc-now"), ()),
-    "lock": (cmd_lock, ("root", "now", "utc-now"), ()),
+    "check": (cmd_check, ("root",), ()),
+    "lock": (cmd_lock, ("root",), ()),
     "unlock": (cmd_unlock, ("root",), ()),
-    "log": (cmd_log, ("root", "kind", "now", "utc-now"), ()),
-    "tick": (cmd_tick, ("root", "utc-now"), ()),
-    "block": (cmd_block, ("root", "utc-now"), ()),
-    "done": (cmd_done, ("root", "utc-now"), ()),
+    "log": (cmd_log, ("root", "kind"), ()),
+    "tick": (cmd_tick, ("root", "id"), ()),
+    "block": (cmd_block, ("root", "id"), ()),
+    "done": (cmd_done, ("root",), ()),
 }
 
 
@@ -896,6 +1018,9 @@ def main(argv=None):
     try:
         cmd, opts, pos = parse_args(argv)
         p = confine(opts["root"])
+        note = check_binding(p)
+        if note and cmd != "check":
+            sys.stderr.write("NOTE: " + note + "\n")
         return COMMANDS[cmd][0](p, opts, pos)
     except Refused as e:
         if cmd_is_check(argv) and not isinstance(e, UsageError):
